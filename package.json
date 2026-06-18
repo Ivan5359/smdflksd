@@ -1,0 +1,26 @@
+{
+  "name": "sitemoney-audit",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "SiteMoney Audit: website audit reports and outreach kit for selling quick conversion fixes.",
+  "scripts": {
+    "dev": "vite --host 127.0.0.1",
+    "api": "node server.js",
+    "build": "vite build",
+    "start": "node server.js",
+    "smoke": "node scripts/smoke-test.mjs"
+  },
+  "dependencies": {
+    "@vitejs/plugin-react": "^5.1.1",
+    "cheerio": "^1.1.2",
+    "express": "^5.2.1",
+    "lucide-react": "^0.468.0",
+    "react": "^19.2.1",
+    "react-dom": "^19.2.1",
+    "vite": "^7.3.0"
+  },
+  "devDependencies": {
+    "playwright": "^1.61.0"
+  }
+}
