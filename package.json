@@ -4,6 +4,9 @@
   "private": true,
   "type": "module",
   "description": "SiteMoney Audit: website audit reports and outreach kit for selling quick conversion fixes.",
+  "engines": {
+    "node": ">=20.19.0"
+  },
   "scripts": {
     "dev": "vite --host 127.0.0.1",
     "api": "node server.js",
@@ -19,8 +22,5 @@
     "react": "^19.2.1",
     "react-dom": "^19.2.1",
     "vite": "^7.3.0"
-  },
-  "devDependencies": {
-    "playwright": "^1.61.0"
   }
 }
