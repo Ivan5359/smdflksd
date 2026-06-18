@@ -72,6 +72,13 @@ const defaultQueue = [
   "https://example.com"
 ].join("\n");
 
+const defaultDiscoveryLocations = [
+  "New York, USA",
+  "London, United Kingdom",
+  "Toronto, Canada",
+  "Dubai, UAE"
+].join("\n");
+
 const messageTabs = [
   { id: "email", label: "Email" },
   { id: "followUp", label: "Follow-up" },
@@ -86,9 +93,20 @@ function App() {
   const [history, setHistory] = useState(() => readLocal("sitemoney.history", []));
   const [crm, setCrm] = useState(() => readLocal("sitemoney.crm", []));
   const [bulkResults, setBulkResults] = useState([]);
+  const [discoveredBusinesses, setDiscoveredBusinesses] = useState([]);
+  const [discoveryLocations, setDiscoveryLocations] = useState(defaultDiscoveryLocations);
+  const [discoverySettings, setDiscoverySettings] = useState({
+    worldwide: true,
+    limit: 30,
+    auditLimit: 6,
+    locationLimit: 5,
+    radiusKm: 14,
+    requireWebsite: false
+  });
   const [messageTab, setMessageTab] = useState("email");
   const [loading, setLoading] = useState(false);
   const [queueLoading, setQueueLoading] = useState(false);
+  const [discoverLoading, setDiscoverLoading] = useState(false);
   const [error, setError] = useState("");
   const [copied, setCopied] = useState("");
   const [serverVersion, setServerVersion] = useState(APP_VERSION);
@@ -118,8 +136,23 @@ function App() {
     [bulkResults]
   );
 
+  const rankedDiscovery = useMemo(
+    () =>
+      [...discoveredBusinesses].sort((a, b) => {
+        if ((b.moneyOpportunity || 0) !== (a.moneyOpportunity || 0)) {
+          return (b.moneyOpportunity || 0) - (a.moneyOpportunity || 0);
+        }
+        return (b.score || 0) - (a.score || 0);
+      }),
+    [discoveredBusinesses]
+  );
+
   function updateForm(key, value) {
     setForm((current) => ({ ...current, [key]: value }));
+  }
+
+  function updateDiscovery(key, value) {
+    setDiscoverySettings((current) => ({ ...current, [key]: value }));
   }
 
   async function runAudit(event, override = {}) {
@@ -173,6 +206,47 @@ function App() {
       setError(queueError.message || "Не удалось запустить очередь.");
     } finally {
       setQueueLoading(false);
+    }
+  }
+
+  async function runDiscovery() {
+    setDiscoverLoading(true);
+    setError("");
+    setCopied("");
+
+    try {
+      const response = await fetch("/api/discover", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          ...form,
+          ...discoverySettings,
+          locations: discoveryLocations,
+          auditFound: true
+        })
+      });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error || "Discovery failed");
+
+      setDiscoveredBusinesses(data.businesses || []);
+      const reportItems = (data.reports || []).map((item) => ({ ok: true, report: item }));
+      setBulkResults(reportItems);
+      const firstReport = data.reports?.[0];
+      if (firstReport) acceptReport(firstReport, true);
+
+      if (form.createCrmTasks && data.reports?.length) {
+        const newTasks = data.reports.map((item) => crmFromReport(item));
+        const next = mergeCrm(newTasks, crm);
+        setCrm(next);
+        writeLocal("sitemoney.crm", next);
+      }
+
+      setCopied("discovery");
+      window.setTimeout(() => setCopied(""), 1600);
+    } catch (discoverError) {
+      setError(discoverError.message || "Не удалось найти бизнесы.");
+    } finally {
+      setDiscoverLoading(false);
     }
   }
 
@@ -395,6 +469,85 @@ function App() {
           <div className="queue-panel">
             <div className="panel-head">
               <div>
+                <span>Глобальный поиск</span>
+                <strong>{discoverySettings.worldwide ? "World" : "Custom"}</strong>
+              </div>
+              <Bot size={16} />
+            </div>
+            <div className="toggle-grid compact">
+              <Toggle
+                label="Искать по миру"
+                checked={discoverySettings.worldwide}
+                onChange={(value) => updateDiscovery("worldwide", value)}
+              />
+              <Toggle
+                label="Только с сайтом"
+                checked={discoverySettings.requireWebsite}
+                onChange={(value) => updateDiscovery("requireWebsite", value)}
+              />
+            </div>
+            <div className="split-fields discovery-numbers">
+              <label>
+                Найти
+                <input
+                  type="number"
+                  min="5"
+                  max="100"
+                  value={discoverySettings.limit}
+                  onChange={(event) => updateDiscovery("limit", event.target.value)}
+                />
+              </label>
+              <label>
+                Аудит
+                <input
+                  type="number"
+                  min="1"
+                  max="25"
+                  value={discoverySettings.auditLimit}
+                  onChange={(event) => updateDiscovery("auditLimit", event.target.value)}
+                />
+              </label>
+            </div>
+            <div className="split-fields discovery-numbers">
+              <label>
+                Городов
+                <input
+                  type="number"
+                  min="1"
+                  max="40"
+                  value={discoverySettings.locationLimit}
+                  onChange={(event) => updateDiscovery("locationLimit", event.target.value)}
+                />
+              </label>
+              <label>
+                Радиус км
+                <input
+                  type="number"
+                  min="1"
+                  max="50"
+                  value={discoverySettings.radiusKm}
+                  onChange={(event) => updateDiscovery("radiusKm", event.target.value)}
+                />
+              </label>
+            </div>
+            <label className="locations-box">
+              Локации
+              <textarea
+                value={discoveryLocations}
+                onChange={(event) => setDiscoveryLocations(event.target.value)}
+                spellCheck="false"
+              />
+            </label>
+            <button className="primary-button wide" onClick={runDiscovery} disabled={discoverLoading}>
+              {discoverLoading ? <Loader2 className="spin" size={16} /> : <Radar size={16} />}
+              Найти бизнесы
+            </button>
+            <p className="helper-copy">Ищет в OpenStreetMap, берет сайт/телефон, аудирует сайты и добавляет лучшие в CRM.</p>
+          </div>
+
+          <div className="queue-panel">
+            <div className="panel-head">
+              <div>
                 <span>Очередь сайтов</span>
                 <strong>{queueUrls.length}</strong>
               </div>
@@ -538,6 +691,38 @@ function App() {
                     <strong>{money(item.money.monthlyOpportunity)}</strong>
                     <em>{item.score.total}</em>
                   </button>
+                ))}
+              </div>
+            </section>
+          ) : null}
+
+          {rankedDiscovery.length ? (
+            <section className="bulk-zone">
+              <SectionTitle icon={<Bot size={18} />} title="Найденные бизнесы автопилотом" inline />
+              <div className="discovery-list">
+                {rankedDiscovery.slice(0, 12).map((business) => (
+                  <article key={business.id}>
+                    <div>
+                      <strong>{business.name}</strong>
+                      <span>{[business.city, business.country].filter(Boolean).join(", ")}</span>
+                    </div>
+                    <div>
+                      <b>{business.website ? "сайт есть" : "сайт не найден"}</b>
+                      <span>{business.topPriority}</span>
+                    </div>
+                    <div>
+                      <em>{business.score || 0}</em>
+                      {business.website ? (
+                        <a href={business.website} target="_blank" rel="noreferrer">
+                          сайт
+                        </a>
+                      ) : (
+                        <a href={business.osmUrl} target="_blank" rel="noreferrer">
+                          карта
+                        </a>
+                      )}
+                    </div>
+                  </article>
                 ))}
               </div>
             </section>

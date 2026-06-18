@@ -349,6 +349,11 @@ select:focus {
   gap: 7px;
 }
 
+.toggle-grid.compact {
+  grid-template-columns: 1fr 1fr;
+  margin-bottom: 10px;
+}
+
 .toggle {
   display: flex;
   justify-content: space-between;
@@ -441,6 +446,25 @@ select:focus {
   min-height: 104px;
   margin-bottom: 10px;
   font-size: 12px;
+}
+
+.locations-box {
+  margin: 10px 0;
+}
+
+.locations-box textarea {
+  min-height: 86px;
+}
+
+.discovery-numbers {
+  margin-top: 10px;
+}
+
+.helper-copy {
+  margin: 10px 0 0;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.45;
 }
 
 .panel-head {
@@ -881,6 +905,61 @@ select:focus {
   text-align: right;
 }
 
+.discovery-list {
+  display: grid;
+  gap: 8px;
+}
+
+.discovery-list article {
+  display: grid;
+  grid-template-columns: minmax(0, 1.2fr) minmax(150px, 0.8fr) 72px;
+  gap: 10px;
+  align-items: center;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #070d18;
+}
+
+.discovery-list strong,
+.discovery-list b,
+.discovery-list span,
+.discovery-list em,
+.discovery-list a {
+  display: block;
+  min-width: 0;
+}
+
+.discovery-list strong {
+  overflow: hidden;
+  color: var(--text);
+  font-size: 13px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.discovery-list b,
+.discovery-list em {
+  color: var(--cyan);
+  font-size: 12px;
+  font-style: normal;
+}
+
+.discovery-list span,
+.discovery-list a {
+  margin-top: 3px;
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.discovery-list a {
+  color: var(--soft);
+  text-decoration: none;
+}
+
 .message-box {
   min-height: 180px;
   margin-bottom: 10px;
@@ -994,7 +1073,8 @@ select:focus {
   .signal-grid,
   .category-strip,
   .evidence-table,
-  .action-rail {
+  .action-rail,
+  .discovery-list article {
     grid-template-columns: 1fr;
   }
 

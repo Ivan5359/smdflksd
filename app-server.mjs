@@ -82,6 +82,63 @@ app.post("/api/bulk-audit", async (request, response) => {
   });
 });
 
+app.post("/api/discover", async (request, response) => {
+  try {
+    const payload = normalizeDiscoveryPayload(request.body || {});
+    const locations = payload.worldwide
+      ? WORLD_LOCATIONS.slice(0, payload.locationLimit)
+      : await resolveLocations(payload);
+    const rawBusinesses = [];
+    const seen = new Set();
+
+    for (const location of locations) {
+      const businesses = await searchBusinesses(location, payload);
+      for (const business of businesses) {
+        const key = business.website || `${business.name}-${business.lat}-${business.lon}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        rawBusinesses.push(business);
+        if (rawBusinesses.length >= payload.limit) break;
+      }
+      if (rawBusinesses.length >= payload.limit) break;
+    }
+
+    const reports = [];
+    if (payload.auditFound) {
+      for (const business of rawBusinesses.filter((item) => item.website).slice(0, payload.auditLimit)) {
+        const report = await auditSingle({
+          ...request.body,
+          url: business.website,
+          niche: payload.niche,
+          city: business.city || payload.city,
+          averageSale: payload.averageSale,
+          monthlyVisitors: payload.monthlyVisitors,
+          mode: "agent",
+          autopilot: true,
+          createCrmTasks: true
+        });
+        report.discoveredBusiness = business;
+        await rememberReport(report);
+        reports.push(report);
+      }
+    }
+
+    response.json({
+      version: APP_VERSION,
+      source: "openstreetmap-overpass",
+      query: payload,
+      searchedLocations: locations.map((item) => item.label),
+      total: rawBusinesses.length,
+      withWebsite: rawBusinesses.filter((item) => item.website).length,
+      withoutWebsite: rawBusinesses.filter((item) => !item.website).length,
+      businesses: rankBusinesses(rawBusinesses, reports),
+      reports
+    });
+  } catch (error) {
+    response.status(400).json({ error: error.message || "Discovery failed" });
+  }
+});
+
 app.get("/api/reports", async (_request, response) => {
   response.json(await readReports());
 });
@@ -218,6 +275,285 @@ function normalizeQueue(value) {
     .map((item) => item.trim())
     .filter(Boolean);
 }
+
+function normalizeDiscoveryPayload(input) {
+  const limit = clampNumber(input.limit, 5, 100, 30);
+  const auditLimit = clampNumber(input.auditLimit, 1, 30, Math.min(6, limit));
+  const locationLimit = clampNumber(input.locationLimit, 1, WORLD_LOCATIONS.length, 5);
+  const city = String(input.city || "").trim();
+  const country = String(input.country || "").trim();
+  const locations = normalizeQueue(input.locations || input.locationList || "");
+  const worldwide =
+    Boolean(input.worldwide) ||
+    /world|global|весь мир|мир|worldwide/i.test(`${input.scope || ""} ${city} ${country}`);
+
+  return {
+    niche: String(input.niche || "local service").trim(),
+    city: city || "Austin",
+    country,
+    locations,
+    worldwide,
+    limit,
+    auditLimit,
+    locationLimit,
+    radiusMeters: clampNumber(input.radiusKm, 1, 50, worldwide ? 12 : 18) * 1000,
+    auditFound: input.auditFound !== false,
+    requireWebsite: Boolean(input.requireWebsite),
+    averageSale: Number(input.averageSale || 300),
+    monthlyVisitors: Number(input.monthlyVisitors || 600)
+  };
+}
+
+async function resolveLocations(payload) {
+  const labels = payload.locations.length
+    ? payload.locations
+    : [`${payload.city}${payload.country ? `, ${payload.country}` : ""}`];
+  const resolved = [];
+  for (const label of labels.slice(0, payload.locationLimit)) {
+    const location = await geocodeLocation(label);
+    if (location) resolved.push(location);
+  }
+  if (!resolved.length) {
+    throw new Error("Не смог найти город/локацию. Попробуй формат: Austin, USA.");
+  }
+  return resolved;
+}
+
+async function geocodeLocation(label) {
+  const url = new URL("https://nominatim.openstreetmap.org/search");
+  url.searchParams.set("q", label);
+  url.searchParams.set("format", "jsonv2");
+  url.searchParams.set("limit", "1");
+  url.searchParams.set("addressdetails", "1");
+  const response = await fetchWithTimeout(url, {
+    headers: {
+      "user-agent": "SiteMoneyAudit/1.0 discovery contact: local-tool"
+    }
+  }, 10000);
+  if (!response.ok) return null;
+  const data = await response.json();
+  const item = data?.[0];
+  if (!item) return null;
+  return {
+    label,
+    lat: Number(item.lat),
+    lon: Number(item.lon),
+    city: item.address?.city || item.address?.town || item.address?.village || label,
+    country: item.address?.country || ""
+  };
+}
+
+async function searchBusinesses(location, payload) {
+  const tagFilters = nicheToOverpassFilters(payload.niche);
+  const query = `
+    [out:json][timeout:25];
+    (
+      ${tagFilters
+        .map((filter) => `node${filter}(around:${payload.radiusMeters},${location.lat},${location.lon});way${filter}(around:${payload.radiusMeters},${location.lat},${location.lon});relation${filter}(around:${payload.radiusMeters},${location.lat},${location.lon});`)
+        .join("\n")}
+    );
+    out center tags ${Math.min(payload.limit * 2, 120)};
+  `;
+  const response = await fetchWithTimeout("https://overpass-api.de/api/interpreter", {
+    method: "POST",
+    headers: {
+      "content-type": "application/x-www-form-urlencoded; charset=UTF-8",
+      "user-agent": "SiteMoneyAudit/1.0 discovery"
+    },
+    body: new URLSearchParams({ data: query })
+  }, 30000);
+
+  if (!response.ok) {
+    throw new Error(`OpenStreetMap search failed: ${response.status}`);
+  }
+  const data = await response.json();
+  return (data.elements || [])
+    .map((element) => normalizeOsmBusiness(element, location, payload))
+    .filter((business) => business.name && (!payload.requireWebsite || business.website))
+    .slice(0, payload.limit);
+}
+
+function normalizeOsmBusiness(element, location, payload) {
+  const tags = element.tags || {};
+  const website = normalizeBusinessWebsite(tags.website || tags["contact:website"] || tags.url);
+  const lat = element.lat || element.center?.lat;
+  const lon = element.lon || element.center?.lon;
+  const name = tags.name || tags.brand || tags.operator || "";
+  const phone = tags.phone || tags["contact:phone"] || "";
+  const email = tags.email || tags["contact:email"] || "";
+  const address = [
+    tags["addr:housenumber"],
+    tags["addr:street"],
+    tags["addr:city"] || location.city,
+    tags["addr:country"] || location.country
+  ]
+    .filter(Boolean)
+    .join(", ");
+  const noWebsitePenalty = website ? 0 : 32;
+  const contactScore = (website ? 34 : 0) + (phone ? 18 : 0) + (email ? 10 : 0);
+  const fitScore = businessNicheFit(tags, payload.niche);
+  const automationScore = Math.max(5, Math.min(100, contactScore + fitScore - noWebsitePenalty + 25));
+
+  return {
+    id: `osm-${element.type}-${element.id}`,
+    source: "OpenStreetMap",
+    name,
+    niche: payload.niche,
+    city: location.city,
+    country: location.country,
+    address,
+    website,
+    phone,
+    email,
+    lat,
+    lon,
+    mapUrl: lat && lon ? `https://www.openstreetmap.org/?mlat=${lat}&mlon=${lon}#map=17/${lat}/${lon}` : "",
+    osmUrl: `https://www.openstreetmap.org/${element.type}/${element.id}`,
+    tags: compactTags(tags),
+    automationScore,
+    status: website ? "ready_to_audit" : "needs_website_lookup",
+    suggestedAction: website
+      ? "Авто-аудит сайта и подготовка сообщения"
+      : "Найти сайт вручную или писать через телефон/карту"
+  };
+}
+
+function rankBusinesses(businesses, reports) {
+  const reportByWebsite = new Map(reports.map((report) => [report.input.url, report]));
+  return businesses
+    .map((business) => {
+      const report = business.website ? reportByWebsite.get(business.website) : null;
+      return {
+        ...business,
+        reportId: report?.id || "",
+        score: report?.score.total || business.automationScore,
+        moneyOpportunity: report?.money.monthlyOpportunity || 0,
+        topPriority: report?.priorities?.[0]?.title || (business.website ? "Ждет аудита" : "Нет сайта в OSM")
+      };
+    })
+    .sort((a, b) => {
+      if (b.moneyOpportunity !== a.moneyOpportunity) return b.moneyOpportunity - a.moneyOpportunity;
+      return b.score - a.score;
+    });
+}
+
+function nicheToOverpassFilters(niche) {
+  const key = String(niche || "").toLowerCase();
+  if (/dent|стомат|зуб/.test(key)) return ['["amenity"="dentist"]'];
+  if (/doctor|clinic|medical|врач|клиник|медиц/.test(key)) return ['["amenity"="clinic"]', '["amenity"="doctors"]', '["healthcare"]'];
+  if (/vet|animal|вет/.test(key)) return ['["amenity"="veterinary"]'];
+  if (/plumb|сантех/.test(key)) return ['["craft"="plumber"]', '["shop"="bathroom_furnishing"]'];
+  if (/electric|электр/.test(key)) return ['["craft"="electrician"]'];
+  if (/hvac|air condition|heating|кондиционер|отоплен/.test(key)) return ['["craft"="hvac"]', '["shop"="air_conditioning"]'];
+  if (/clean|уборк|клининг/.test(key)) return ['["craft"="cleaning"]', '["shop"="dry_cleaning"]', '["shop"="laundry"]'];
+  if (/lock|ключ|замк/.test(key)) return ['["craft"="locksmith"]', '["shop"="locksmith"]'];
+  if (/roof|крыш|кров/.test(key)) return ['["craft"="roofer"]'];
+  if (/garden|landscap|ландшафт|сад/.test(key)) return ['["craft"="gardener"]', '["shop"="garden_centre"]'];
+  if (/salon|hair|beauty|barber|салон|парик/.test(key)) return ['["shop"="hairdresser"]', '["shop"="beauty"]'];
+  if (/spa|massage|массаж/.test(key)) return ['["shop"="massage"]', '["leisure"="spa"]'];
+  if (/law|legal|юрист|адвокат/.test(key)) return ['["office"="lawyer"]'];
+  if (/account|tax|bookkeep|бухгалтер|налог/.test(key)) return ['["office"="accountant"]'];
+  if (/restaurant|food|cafe|ресторан|кафе/.test(key)) return ['["amenity"="restaurant"]', '["amenity"="cafe"]'];
+  if (/gym|fitness|спорт/.test(key)) return ['["leisure"="fitness_centre"]', '["sport"]'];
+  if (/real estate|realtor|недвиж/.test(key)) return ['["office"="estate_agent"]'];
+  if (/auto|car|garage|авто/.test(key)) return ['["shop"="car_repair"]', '["amenity"="vehicle_inspection"]'];
+  if (/hotel|hostel|travel|отель|гостин/.test(key)) return ['["tourism"="hotel"]', '["tourism"="hostel"]'];
+  if (/photo|wedding|event|свад|фото/.test(key)) return ['["craft"="photographer"]', '["shop"="bridal"]'];
+  if (/child|daycare|kindergarten|детск|садик/.test(key)) return ['["amenity"="kindergarten"]', '["social_facility"="childcare"]'];
+  return ['["shop"]', '["office"]', '["craft"]'];
+}
+
+function normalizeBusinessWebsite(value) {
+  const raw = String(value || "").trim();
+  if (!raw) return "";
+  try {
+    return normalizeUrl(raw);
+  } catch {
+    try {
+      return normalizeUrl(raw.split(/\s+/)[0]);
+    } catch {
+      return "";
+    }
+  }
+}
+
+function businessNicheFit(tags, niche) {
+  const haystack = `${tags.amenity || ""} ${tags.shop || ""} ${tags.office || ""} ${tags.craft || ""} ${tags.leisure || ""} ${tags.tourism || ""} ${tags.healthcare || ""} ${tags.social_facility || ""} ${tags.name || ""}`.toLowerCase();
+  return String(niche || "")
+    .toLowerCase()
+    .split(/\s+/)
+    .filter((token) => token.length > 2)
+    .some((token) => haystack.includes(token))
+    ? 28
+    : 12;
+}
+
+function compactTags(tags) {
+  const allowed = ["amenity", "shop", "office", "craft", "leisure", "sport", "tourism", "healthcare", "social_facility", "brand"];
+  return Object.fromEntries(allowed.filter((key) => tags[key]).map((key) => [key, tags[key]]));
+}
+
+function clampNumber(value, min, max, fallback) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) return fallback;
+  return Math.min(max, Math.max(min, Math.round(number)));
+}
+
+async function fetchWithTimeout(url, options = {}, timeoutMs = 12000) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(url, { ...options, signal: controller.signal });
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+const WORLD_LOCATIONS = [
+  { label: "New York, USA", city: "New York", country: "United States", lat: 40.7128, lon: -74.006 },
+  { label: "Los Angeles, USA", city: "Los Angeles", country: "United States", lat: 34.0522, lon: -118.2437 },
+  { label: "Chicago, USA", city: "Chicago", country: "United States", lat: 41.8781, lon: -87.6298 },
+  { label: "Miami, USA", city: "Miami", country: "United States", lat: 25.7617, lon: -80.1918 },
+  { label: "London, United Kingdom", city: "London", country: "United Kingdom", lat: 51.5074, lon: -0.1278 },
+  { label: "Manchester, United Kingdom", city: "Manchester", country: "United Kingdom", lat: 53.4808, lon: -2.2426 },
+  { label: "Toronto, Canada", city: "Toronto", country: "Canada", lat: 43.6532, lon: -79.3832 },
+  { label: "Vancouver, Canada", city: "Vancouver", country: "Canada", lat: 49.2827, lon: -123.1207 },
+  { label: "Sydney, Australia", city: "Sydney", country: "Australia", lat: -33.8688, lon: 151.2093 },
+  { label: "Melbourne, Australia", city: "Melbourne", country: "Australia", lat: -37.8136, lon: 144.9631 },
+  { label: "Dubai, UAE", city: "Dubai", country: "United Arab Emirates", lat: 25.2048, lon: 55.2708 },
+  { label: "Doha, Qatar", city: "Doha", country: "Qatar", lat: 25.2854, lon: 51.531 },
+  { label: "Singapore", city: "Singapore", country: "Singapore", lat: 1.3521, lon: 103.8198 },
+  { label: "Hong Kong", city: "Hong Kong", country: "Hong Kong", lat: 22.3193, lon: 114.1694 },
+  { label: "Tokyo, Japan", city: "Tokyo", country: "Japan", lat: 35.6762, lon: 139.6503 },
+  { label: "Seoul, South Korea", city: "Seoul", country: "South Korea", lat: 37.5665, lon: 126.978 },
+  { label: "Bangkok, Thailand", city: "Bangkok", country: "Thailand", lat: 13.7563, lon: 100.5018 },
+  { label: "Kuala Lumpur, Malaysia", city: "Kuala Lumpur", country: "Malaysia", lat: 3.139, lon: 101.6869 },
+  { label: "Madrid, Spain", city: "Madrid", country: "Spain", lat: 40.4168, lon: -3.7038 },
+  { label: "Barcelona, Spain", city: "Barcelona", country: "Spain", lat: 41.3874, lon: 2.1686 },
+  { label: "Berlin, Germany", city: "Berlin", country: "Germany", lat: 52.52, lon: 13.405 },
+  { label: "Munich, Germany", city: "Munich", country: "Germany", lat: 48.1351, lon: 11.582 },
+  { label: "Paris, France", city: "Paris", country: "France", lat: 48.8566, lon: 2.3522 },
+  { label: "Amsterdam, Netherlands", city: "Amsterdam", country: "Netherlands", lat: 52.3676, lon: 4.9041 },
+  { label: "Milan, Italy", city: "Milan", country: "Italy", lat: 45.4642, lon: 9.19 },
+  { label: "Zurich, Switzerland", city: "Zurich", country: "Switzerland", lat: 47.3769, lon: 8.5417 },
+  { label: "Stockholm, Sweden", city: "Stockholm", country: "Sweden", lat: 59.3293, lon: 18.0686 },
+  { label: "Warsaw, Poland", city: "Warsaw", country: "Poland", lat: 52.2297, lon: 21.0122 },
+  { label: "Prague, Czechia", city: "Prague", country: "Czechia", lat: 50.0755, lon: 14.4378 },
+  { label: "Lisbon, Portugal", city: "Lisbon", country: "Portugal", lat: 38.7223, lon: -9.1393 },
+  { label: "Vienna, Austria", city: "Vienna", country: "Austria", lat: 48.2082, lon: 16.3738 },
+  { label: "Mexico City, Mexico", city: "Mexico City", country: "Mexico", lat: 19.4326, lon: -99.1332 },
+  { label: "Sao Paulo, Brazil", city: "Sao Paulo", country: "Brazil", lat: -23.5558, lon: -46.6396 },
+  { label: "Buenos Aires, Argentina", city: "Buenos Aires", country: "Argentina", lat: -34.6037, lon: -58.3816 },
+  { label: "Bogota, Colombia", city: "Bogota", country: "Colombia", lat: 4.711, lon: -74.0721 },
+  { label: "Santiago, Chile", city: "Santiago", country: "Chile", lat: -33.4489, lon: -70.6693 },
+  { label: "Johannesburg, South Africa", city: "Johannesburg", country: "South Africa", lat: -26.2041, lon: 28.0473 },
+  { label: "Cape Town, South Africa", city: "Cape Town", country: "South Africa", lat: -33.9249, lon: 18.4241 },
+  { label: "Nairobi, Kenya", city: "Nairobi", country: "Kenya", lat: -1.2921, lon: 36.8219 },
+  { label: "Istanbul, Turkiye", city: "Istanbul", country: "Turkiye", lat: 41.0082, lon: 28.9784 },
+  { label: "Tel Aviv, Israel", city: "Tel Aviv", country: "Israel", lat: 32.0853, lon: 34.7818 },
+  { label: "Mumbai, India", city: "Mumbai", country: "India", lat: 19.076, lon: 72.8777 },
+  { label: "Bengaluru, India", city: "Bengaluru", country: "India", lat: 12.9716, lon: 77.5946 }
+];
 
 async function readReports() {
   try {
