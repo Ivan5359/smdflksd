@@ -1,41 +1,59 @@
 import React, { useEffect, useMemo, useState } from "react";
 import { createRoot } from "react-dom/client";
-import {
-  Activity,
-  AlertTriangle,
-  ArrowDownToLine,
-  BadgeDollarSign,
-  BarChart3,
-  Bot,
-  Check,
-  ChevronRight,
-  Clipboard,
-  Copy,
-  Download,
-  ExternalLink,
-  FileText,
-  Gauge,
-  History,
-  Loader2,
-  Mail,
-  Play,
-  Plus,
-  Printer,
-  Radar,
-  RefreshCw,
-  Search,
-  Send,
-  Settings2,
-  ShieldCheck,
-  Sparkles,
-  Target,
-  Trash2,
-  TrendingUp,
-  Zap
-} from "lucide-react";
 import { APP_VERSION } from "./lib/auditEngine.js";
 import { demoReport } from "./sampleAudit.js";
 import "./styles.css";
+
+function AppIcon({ size = 18, className = "", strokeWidth = 2, ...props }) {
+  return (
+    <svg
+      width={size}
+      height={size}
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={strokeWidth}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      className={className}
+      aria-hidden="true"
+      {...props}
+    >
+      <path d="M12 3.75 19.2 7.9v8.2L12 20.25l-7.2-4.15V7.9L12 3.75Z" />
+      <path d="M8.5 12.4 11 14.9l4.7-5.6" />
+      <path d="M12 3.75v4.1" />
+    </svg>
+  );
+}
+
+const Activity = AppIcon;
+const AlertTriangle = AppIcon;
+const ArrowDownToLine = AppIcon;
+const BadgeDollarSign = AppIcon;
+const BarChart3 = AppIcon;
+const Bot = AppIcon;
+const Check = AppIcon;
+const ChevronRight = AppIcon;
+const Clipboard = AppIcon;
+const Copy = AppIcon;
+const Download = AppIcon;
+const ExternalLink = AppIcon;
+const FileText = AppIcon;
+const History = AppIcon;
+const Loader2 = AppIcon;
+const Mail = AppIcon;
+const Play = AppIcon;
+const Plus = AppIcon;
+const Printer = AppIcon;
+const Radar = AppIcon;
+const Search = AppIcon;
+const Send = AppIcon;
+const ShieldCheck = AppIcon;
+const Sparkles = AppIcon;
+const Target = AppIcon;
+const Trash2 = AppIcon;
+const TrendingUp = AppIcon;
+const Zap = AppIcon;
 
 const defaultForm = {
   url: "",

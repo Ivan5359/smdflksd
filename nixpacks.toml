@@ -8,4 +8,4 @@ cmds = ["pnpm i --frozen-lockfile"]
 cmds = ["pnpm run build"]
 
 [start]
-cmd = "npm start"
+cmd = "node app-server.mjs"

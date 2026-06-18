@@ -54,3 +54,12 @@ npm start
 ```
 
 Railway использует `railway.json`, `Procfile`, `/health` и `/__version`.
+Production entrypoint: `node app-server.mjs`.
+
+Если Railway показывает `ERROR packages field missing or empty`, проверь что в корне есть
+`pnpm-workspace.yaml` с блоком:
+
+```yaml
+packages:
+  - "."
+```

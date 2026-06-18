@@ -12,4 +12,4 @@ if ($nodeCommand) {
 }
 
 Write-Host "Starting SiteMoney Audit on http://127.0.0.1:8787"
-& $node server.js
+& $node app-server.mjs
