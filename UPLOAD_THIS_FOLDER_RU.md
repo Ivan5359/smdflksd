@@ -1,17 +1,16 @@
-# Заливать эту папку
+# Заливать эту папку целиком
 
-Загружай в GitHub/Railway содержимое этой папки целиком.
+Это финальный Railway-пакет. В нем есть и исходники, и готовый `dist/`.
 
-Что внутри:
+Что исправлено:
 
-- новый радикальный черно-бело-синий command-center дизайн;
-- центральный `Радар целей`;
-- глобальный автопоиск бизнесов через OpenStreetMap/Overpass;
+- backend версия: `SITEMONEY_AUDIT_20260622_RUNTIME_REBUILD`;
+- новый command-center дизайн с `Радар целей`;
+- глобальный автопоиск бизнесов;
 - автоаудит найденных сайтов;
-- сортировка целей по приоритету и потенциальным деньгам;
-- готовые email, follow-up, DM и Telegram-сообщения;
-- CRM-задачи, история и экспорт HTML/JSON/CSV;
-- build-check, который не даст Railway задеплоить старый frontend без `Глобальный поиск`.
+- готовые сообщения, CRM и экспорт;
+- `dist/` теперь входит в пакет, чтобы Railway не показывал старый frontend;
+- сервер при запуске проверяет frontend и сам пересобирает `dist`, если видит старые assets.
 
 Обязательные файлы и папки:
 
@@ -28,28 +27,35 @@
 - `src/`
 - `public/`
 - `scripts/`
+- `dist/`
 - `README_RU.md`
 - `RUN_LOCAL.ps1`
 - `.gitignore`
 
-Не загружать отдельно:
+Не загружать:
 
 - `node_modules/`
-- `dist/`
-- `server.out.log`
-- `server.err.log`
-- `design/`
 - `data/`
-- `RAILWAY_UPLOAD_READY.zip`
+- `.env`
+- `*.log`
 
 Railway:
 
-- Root Directory: пусто, если эта папка является корнем репозитория.
-- Если ты загрузил папку как подпапку в репозитории, Root Directory должен быть `RAILWAY_UPLOAD_READY`.
+- Root Directory: пусто, если файлы этой папки лежат в корне репозитория.
+- Если эта папка лежит как подпапка в репозитории, Root Directory должен быть `RAILWAY_UPLOAD_READY`.
 - Start Command: `node app-server.mjs`.
-- Проверка backend после деплоя: открыть `/__version` и увидеть `SITEMONEY_AUDIT_20260619_GLOBAL_DISCOVERY`.
-- Проверка frontend после деплоя: открыть `/__frontend-check`; все `checks` должны быть `true`.
 
-Если `/__version` новый, а сайт визуально старый, значит frontend не пересобрался или Railway смотрит не на ту папку. Тогда проверь `Root Directory` и redeploy последней версии.
+Проверка после деплоя:
 
-Важно: этот пакет не использует `lucide-react`, чтобы Railway не мог снова упасть на `createLucideIcon.js`.
+1. Открой `/__version`.
+2. Там должно быть `SITEMONEY_AUDIT_20260622_RUNTIME_REBUILD`.
+3. Открой `/__frontend-check`.
+4. Там должно быть:
+
+```json
+{
+  "ok": true
+}
+```
+
+Если `/__frontend-check` снова показывает assets `index-DF1kHXYy.js` и `index-BwYpoT4u.css`, значит Railway смотрит на старую папку или не получил `dist/`, `src/`, `scripts/verify-build.mjs` и новый `app-server.mjs`.

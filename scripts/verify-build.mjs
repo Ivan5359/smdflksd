@@ -1,10 +1,11 @@
 import fs from "node:fs/promises";
 import path from "node:path";
+import { APP_VERSION } from "../src/lib/auditEngine.js";
 
 const distDir = path.join(process.cwd(), "dist");
 const indexPath = path.join(distDir, "index.html");
 const expectedMarkers = [
-  "SITEMONEY_AUDIT_20260619_GLOBAL_DISCOVERY",
+  APP_VERSION,
   "Глобальный поиск",
   "Найти бизнесы",
   "Найденные бизнесы автопилотом"

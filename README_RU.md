@@ -61,6 +61,14 @@ npm start
 Railway использует `railway.json`, `Procfile`, `/health` и `/__version`.
 Production entrypoint: `node app-server.mjs`.
 
+Проверка после деплоя:
+
+- `/__version` должен показать `SITEMONEY_AUDIT_20260622_RUNTIME_REBUILD`;
+- `/__frontend-check` должен показать `"ok": true`;
+- если frontend старый, сервер сам попробует пересобрать `dist` при запуске.
+
+Папка `dist/` специально не игнорируется: она входит в deploy как готовый frontend fallback.
+
 Если Railway показывает `ERROR packages field missing or empty`, проверь что в корне есть
 `pnpm-workspace.yaml` с блоком:
 

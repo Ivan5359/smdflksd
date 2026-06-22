@@ -148,6 +148,8 @@ app.get("/api/reports", async (_request, response) => {
   response.json(await readReports());
 });
 
+await ensureFreshFrontendBuild();
+
 app.use(
   express.static(DIST_DIR, {
     setHeaders(response, filePath) {
@@ -171,6 +173,30 @@ app.get(/.*/, async (_request, response, next) => {
 app.listen(PORT, () => {
   console.log(`SiteMoney Audit ${APP_VERSION} running on http://127.0.0.1:${PORT}`);
 });
+
+async function ensureFreshFrontendBuild() {
+  const current = await inspectFrontendBuild();
+  if (current.ok) return current;
+
+  console.warn("Frontend build is missing or stale. Rebuilding before serving traffic.", current);
+  try {
+    const { build } = await import("vite");
+    await build({
+      root: __dirname,
+      configFile: path.join(__dirname, "vite.config.js"),
+      logLevel: "warn"
+    });
+  } catch (error) {
+    throw new Error(`Frontend runtime rebuild failed: ${error.message || error}`);
+  }
+
+  const rebuilt = await inspectFrontendBuild();
+  if (!rebuilt.ok) {
+    throw new Error(`Frontend rebuild stayed stale: ${JSON.stringify(rebuilt)}`);
+  }
+  console.log("Frontend runtime rebuild verified.", rebuilt.checks);
+  return rebuilt;
+}
 
 async function auditSingle(input) {
   const normalizedUrl = normalizeUrl(input.url);
