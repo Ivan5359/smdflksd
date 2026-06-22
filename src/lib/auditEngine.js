@@ -1,4 +1,4 @@
-export const APP_VERSION = "SITEMONEY_AUDIT_20260622_BACKGROUND_JOBS_NO_STALE";
+export const APP_VERSION = "SITEMONEY_AUDIT_20260622_PRO_OUTREACH_SITE_QA";
 
 const CTA_TERMS = [
   "book",
@@ -121,6 +121,9 @@ export function createFallbackFacts(input, reason = "Сайт недоступе
 export function buildReport(input, facts) {
   const normalizedInput = normalizeInput(input);
   const safeFacts = { ...createFallbackFacts(normalizedInput), ...facts };
+  if (safeFacts.source !== "fallback" && safeFacts.status > 0) {
+    safeFacts.fetchError = facts.fetchError || "";
+  }
   const categories = scoreCategories(normalizedInput, safeFacts);
   const total = clamp(
     Math.round(
@@ -322,6 +325,10 @@ function scoreCategories(input, facts) {
 function buildPriorities(input, facts, categories) {
   const items = [];
 
+  if (facts.status >= 400 || facts.fetchError) {
+    const statusText = facts.status ? `HTTP ${facts.status}` : "сайт не ответил";
+    items.push(priority("site_down", "Сайт не открывается нормально", "high", 30, `Публичная ссылка сейчас выглядит проблемной: ${statusText}.`, "Проверить домен, редиректы, главную страницу и публичные ссылки из карт/профилей."));
+  }
   if (!facts.hasPhone && !facts.hasEmail) {
     items.push(priority("contact", "Нет быстрого контакта", "high", 24, "Владелец теряет горячие заявки, потому что клиенту некуда сразу нажать.", "Добавить закрепленный CTA, кликабельный телефон и короткую форму."));
   }
@@ -400,18 +407,33 @@ function buildOutreach(input, facts, priorities, money) {
   const top = priorities[0];
   const host = facts.host;
   const business = inferBusinessName(facts, input);
-  const monthly = formatUsd(money.monthlyOpportunity);
-  const firstFix = top?.fix || "быстро усилить путь к заявке";
+  const issueTitle = outboundPriorityTitle(top);
+  const firstFix = outboundPriorityFix(top);
+  const city = input.city ? ` in ${input.city}` : "";
+  const subject = top?.key === "site_down"
+    ? `Website link issue for ${business}`
+    : `Small website fix for ${business}`;
 
-  const email = `Hi ${business} team,\n\nI ran a quick conversion audit of ${host}. One thing stood out: ${top.title.toLowerCase()}.\n\nThis usually means visitors can like the business but still leave before sending a request. Based on your current signals, I would frame the opportunity around roughly ${monthly}/month in recoverable lead value. Not a guarantee, just a practical sales estimate.\n\nI can fix the first layer fast: ${firstFix}\n\nIf useful, I can send a 1-page report and a fixed-price quick sprint.`;
+  if (top?.key === "site_down") {
+    const statusText = facts.status ? `HTTP ${facts.status}` : "did not load from my check";
+    const statusSentence = facts.status ? `It returned ${statusText}.` : "It did not load from my check.";
+    const email = `Subject: ${subject}\n\nHi ${business} team,\n\nI found your business${city} and checked the public website link I could find: ${host}.\n\n${statusSentence} I do not want to assume it is broken for every visitor, but if this is the same link customers see from search or maps, it can quietly block calls before they reach you.\n\nI can send a short screenshot note with the exact link I checked and the first fix I would make: ${firstFix}\n\nIf the link is outdated, you can ignore it. If it is still public, I can help clean it up as a small fixed-price sprint.`;
+    const followUp = `Quick follow-up on ${host}: the public link I checked still looked problematic. I can send the screenshot and exact fix list first, no redesign pitch.`;
+    const dmStatus = facts.status ? `returned ${statusText}` : "did not load from my check";
+    const dm = `Quick note: the public website link I found for ${business} ${dmStatus}. Want me to send the screenshot and the link I checked?`;
+    const telegram = `Письмо для ${host}: публичная ссылка выглядит проблемной (${statusText}). Заход: отправить screenshot + точный список исправлений, без обещаний дохода.`;
+    return { subject, email, followUp, dm, telegram };
+  }
 
-  const followUp = `Quick follow-up on ${host}: the main issue is still ${top.title.toLowerCase()}. I can package the fix as a small sprint so there is no long redesign process. First step would be: ${firstFix}`;
+  const email = `Subject: ${subject}\n\nHi ${business} team,\n\nI found your business${city} and opened ${host}. One practical thing stood out: ${issueTitle}.\n\nI am not pitching a full redesign. The useful first step would be small and measurable: ${firstFix}\n\nI can send a 1-page screenshot plan showing the issue, the fix, and what I would change first. If it looks useful, I can implement it as a fixed-price quick sprint.\n\nShould I send the screenshot plan?`;
 
-  const dm = `Quick note: I checked ${host} and found a clear lead-capture gap: ${top.title.toLowerCase()}. I made a short fix plan that could recover about ${monthly}/mo in lead value. Want me to send it?`;
+  const followUp = `Quick follow-up on ${host}: I found one small website fix worth checking (${issueTitle}). I can send the screenshot plan first so you can judge it before talking about any work.`;
 
-  const telegram = `Аудит ${host}: главный рычаг - ${top.title}. Потенциал разговора: ${monthly}/мес. Первый продаваемый фикс: ${firstFix}`;
+  const dm = `Quick note: I opened ${host} and found one practical website fix: ${issueTitle}. Want me to send the screenshot plan?`;
 
-  return { email, followUp, dm, telegram };
+  const telegram = `Аудит ${host}: заход без спама - ${top.title}. Первый фикс: ${firstFix}. Отправлять screenshot plan, не обещать деньги.`;
+
+  return { subject, email, followUp, dm, telegram };
 }
 
 function buildPackage(input, priorities, money) {
@@ -509,6 +531,40 @@ function buildNextActions(input, facts, priorities) {
 
 function priority(key, title, severity, moneyWeight, sellLine, fix) {
   return { key, title, severity, moneyWeight, sellLine, fix };
+}
+
+function outboundPriorityTitle(priorityItem) {
+  const titles = {
+    site_down: "the public website link appears to be broken",
+    contact: "the site does not make the next contact step obvious enough",
+    booking: "there is no simple request or booking step near the first visit",
+    cta: "the main call-to-action is easy to miss",
+    proof: "trust proof is not close enough to the request step",
+    local: "the local service information could be clearer",
+    schema: "the local business data could be cleaner for search",
+    "mobile-security": "the mobile or security basics need cleanup",
+    speed: "the page feels heavier than it needs to be",
+    images: "the images are not helping local search enough",
+    growth: "the site is decent, but the request path can be measured and improved"
+  };
+  return titles[priorityItem?.key] || "one practical website fix";
+}
+
+function outboundPriorityFix(priorityItem) {
+  const fixes = {
+    site_down: "check the public link, redirects, and the page customers land on",
+    contact: "make the phone/request action visible above the fold and add one short form",
+    booking: "add a short request or booking form with name, phone, service needed, and preferred time",
+    cta: "make one primary call-to-action obvious and repeat it after the proof sections",
+    proof: "move reviews, guarantees, or credibility proof closer to the request step",
+    local: "make city, service area, map, and hours clearer for local visitors",
+    schema: "clean up LocalBusiness/service structured data",
+    "mobile-security": "fix mobile viewport, HTTPS, redirects, and basic security headers",
+    speed: "compress heavy assets and remove unnecessary scripts",
+    images: "add useful image alt text tied to service and city terms",
+    growth: "measure the primary request action and test one stronger CTA"
+  };
+  return fixes[priorityItem?.key] || "send a screenshot plan with the first fix";
 }
 
 function evidence(label, value, good) {

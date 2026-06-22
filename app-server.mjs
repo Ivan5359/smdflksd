@@ -190,6 +190,10 @@ app.get("/api/jobs/:id", (request, response) => {
     response.status(404).json({ ok: false, error: "Job not found" });
     return;
   }
+  if (!isCurrentJob(job)) {
+    response.status(410).json({ ok: false, error: "Job is from an older build" });
+    return;
+  }
   response.json({
     ok: true,
     version: APP_VERSION,
@@ -271,7 +275,7 @@ async function auditSingle(input) {
       }
     });
 
-    const html = await fetchResponse.text();
+    const html = await readTextWithTimeout(fetchResponse, 12000);
     const loadMs = Date.now() - startedAt;
     const facts = extractFacts({
       input,
@@ -342,7 +346,9 @@ async function executeLeadMachine(input = {}, onProgress = null) {
     totals: {
       found: discovery.rawBusinesses.length,
       ranked: leads.length,
-      withWebsite: leads.filter((lead) => lead.website).length,
+      withWebsite: leads.filter((lead) => lead.website && lead.websiteReachable !== false).length,
+      workingWebsite: leads.filter((lead) => lead.websiteReachable === true).length,
+      badWebsite: leads.filter((lead) => lead.websiteReachable === false).length,
       withoutWebsite: leads.filter((lead) => !lead.website).length,
       audited: discovery.reports.length
     },
@@ -357,6 +363,7 @@ async function startLeadMachineJob(input = {}) {
   const job = {
     id: createJobId(),
     type: "lead-machine",
+    appVersion: APP_VERSION,
     status: "queued",
     createdAt: now,
     updatedAt: now,
@@ -471,6 +478,7 @@ function publicJob(job) {
   return {
     id: job.id,
     type: job.type,
+    appVersion: job.appVersion || job.result?.version || "",
     status: job.status,
     createdAt: job.createdAt,
     updatedAt: job.updatedAt,
@@ -485,8 +493,13 @@ function publicJob(job) {
 
 function latestJob(type = "lead-machine") {
   return [...jobsCache.values()]
-    .filter((job) => job.type === type)
+    .filter((job) => job.type === type && isCurrentJob(job))
     .sort((a, b) => new Date(b.createdAt || 0) - new Date(a.createdAt || 0))[0] || null;
+}
+
+function isCurrentJob(job) {
+  if (!job) return false;
+  return job.appVersion === APP_VERSION || job.result?.version === APP_VERSION;
 }
 
 async function loadJobs() {
@@ -543,6 +556,8 @@ async function inspectFrontendBuild() {
     scanContinues: "Скан продолжается",
     latestScan: "Последний скан",
     serverJob: "Серверный job",
+    checkedWebsite: "сайт проверен",
+    ownerEmail: "Owner email",
     safeAuditAction: "Проверить сайт",
     outreachPack: "TXT pack",
     googleSearch: "Google поиск"
@@ -632,6 +647,7 @@ function extractFacts({ input, finalUrl, status, headers, html, loadMs }) {
 
   return {
     source: "live",
+    fetchError: "",
     finalUrl,
     host: url.hostname,
     status,
@@ -737,9 +753,15 @@ async function runBusinessDiscovery(payload, input = {}, onProgress = null) {
     throw new Error(`Поиск временно не дал результатов. ${warnings.slice(0, 2).join(" | ")}`);
   }
 
+  if (payload.validateWebsites) {
+    await validateBusinessWebsites(rawBusinesses, payload, onProgress);
+  }
+
   const reports = [];
   if (payload.auditFound) {
-    const auditTargets = rawBusinesses.filter((item) => item.website).slice(0, payload.auditLimit);
+    const auditTargets = rawBusinesses
+      .filter((item) => item.website && item.websiteReachable !== false)
+      .slice(0, payload.auditLimit);
     await reportProgress(onProgress, {
       phase: "audit",
       message: auditTargets.length ? `Аудирую ${auditTargets.length} сайтов` : "Нет сайтов для авто-аудита, ранжирую контакты",
@@ -793,6 +815,82 @@ async function runBusinessDiscovery(payload, input = {}, onProgress = null) {
   };
 }
 
+async function validateBusinessWebsites(rawBusinesses, payload, onProgress = null) {
+  const targets = rawBusinesses
+    .filter((business) => business.website)
+    .slice(0, payload.websiteCheckLimit || rawBusinesses.length);
+  if (!targets.length) return;
+
+  await reportProgress(onProgress, {
+    phase: "website-check",
+    message: `Проверяю ${targets.length} сайтов на 404 и редиректы`,
+    percent: 68,
+    found: rawBusinesses.length,
+    checkedWebsites: 0,
+    totalWebsiteChecks: targets.length
+  });
+
+  const batchSize = 4;
+  for (let index = 0; index < targets.length; index += batchSize) {
+    const batch = targets.slice(index, index + batchSize);
+    await Promise.all(
+      batch.map(async (business) => {
+        const health = await quickWebsiteHealth(business.website);
+        Object.assign(business, health);
+      })
+    );
+    await reportProgress(onProgress, {
+      phase: "website-check",
+      message: `Проверено сайтов: ${Math.min(index + batch.length, targets.length)}/${targets.length}`,
+      percent: Math.min(73, 68 + Math.round(((index + batch.length) / targets.length) * 5)),
+      found: rawBusinesses.length,
+      checkedWebsites: Math.min(index + batch.length, targets.length),
+      totalWebsiteChecks: targets.length
+    });
+  }
+}
+
+async function quickWebsiteHealth(website) {
+  try {
+    const response = await fetchWithTimeout(website, {
+      method: "GET",
+      redirect: "follow",
+      headers: {
+        "user-agent":
+          "Mozilla/5.0 SiteMoneyAudit/1.0 (+website availability check)",
+        accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+      }
+    }, 9000);
+    const status = response.status;
+    const finalUrl = response.url || website;
+    const definitelyBad = isDefinitelyBadWebsiteStatus(status);
+    const reachable = status >= 200 && status < 400 ? true : definitelyBad ? false : null;
+    return {
+      websiteChecked: true,
+      websiteStatus: status,
+      websiteFinalUrl: finalUrl,
+      websiteReachable: reachable,
+      websiteProblem: definitelyBad
+        ? `Публичная ссылка отдает HTTP ${status}`
+        : status >= 400
+          ? `Проверка сайта вернула HTTP ${status}, нужна ручная проверка`
+          : ""
+    };
+  } catch (error) {
+    return {
+      websiteChecked: true,
+      websiteStatus: 0,
+      websiteFinalUrl: website,
+      websiteReachable: null,
+      websiteProblem: readableFetchError(error)
+    };
+  }
+}
+
+function isDefinitelyBadWebsiteStatus(status) {
+  return [404, 410, 451].includes(Number(status));
+}
+
 function normalizeDiscoveryPayload(input) {
   const limit = clampNumber(input.limit, 5, 100, 30);
   const auditLimit = clampNumber(input.auditLimit, 1, 30, Math.min(6, limit));
@@ -816,6 +914,8 @@ function normalizeDiscoveryPayload(input) {
     radiusMeters: clampNumber(input.radiusKm, 1, 50, worldwide ? 12 : 18) * 1000,
     auditFound: input.auditFound !== false,
     requireWebsite: Boolean(input.requireWebsite),
+    validateWebsites: input.validateWebsites !== false,
+    websiteCheckLimit: clampNumber(input.websiteCheckLimit, 0, 100, Math.min(limit, 45)),
     averageSale: Number(input.averageSale || 300),
     monthlyVisitors: Number(input.monthlyVisitors || 600)
   };
@@ -857,7 +957,7 @@ async function geocodeLocation(label) {
     }
   }, 10000);
   if (!response.ok) return null;
-  const data = await response.json();
+  const data = await readJsonWithTimeout(response, 10000);
   const item = data?.[0];
   if (!item) return null;
   return {
@@ -894,10 +994,12 @@ async function searchBusinesses(location, payload) {
         lastError = `${new URL(endpoint).hostname} ${response.status}`;
         continue;
       }
-      const data = await response.json();
+      const data = await readJsonWithTimeout(response, 15000);
       return (data.elements || [])
         .map((element) => normalizeOsmBusiness(element, location, payload))
+        .filter((business) => isRelevantBusinessForNiche(business, payload.niche))
         .filter((business) => business.name && (!payload.requireWebsite || business.website))
+        .sort(sortBusinessesByContactQuality)
         .slice(0, payload.limit);
     } catch (error) {
       lastError = `${new URL(endpoint).hostname} ${error.message || "request failed"}`;
@@ -940,10 +1042,12 @@ async function searchBusinessesWithNominatim(location, payload) {
     }
   }, 15000);
   if (!response.ok) return [];
-  const data = await response.json();
+  const data = await readJsonWithTimeout(response, 10000);
   return (data || [])
     .map((item) => normalizeNominatimBusiness(item, location, payload))
+    .filter((business) => isRelevantBusinessForNiche(business, payload.niche))
     .filter((business) => business.name && (!payload.requireWebsite || business.website))
+    .sort(sortBusinessesByContactQuality)
     .slice(0, payload.limit);
 }
 
@@ -1042,17 +1146,38 @@ function normalizeOsmBusiness(element, location, payload) {
   };
 }
 
+function sortBusinessesByContactQuality(a, b) {
+  return businessContactQuality(b) - businessContactQuality(a);
+}
+
+function businessContactQuality(business) {
+  return (
+    (business.website ? 120 : 0) +
+    (business.phone ? 35 : 0) +
+    (business.email ? 28 : 0) +
+    (business.mapUrl || business.osmUrl ? 12 : 0) +
+    Number(business.automationScore || 0)
+  );
+}
+
 function rankBusinesses(businesses, reports) {
   const reportByWebsite = new Map(reports.map((report) => [report.input.url, report]));
   return businesses
     .map((business) => {
       const report = business.website ? reportByWebsite.get(business.website) : null;
+      const health = getWebsiteHealth(business, report);
       return {
         ...business,
         reportId: report?.id || "",
+        websiteChecked: health.checked,
+        websiteStatus: health.status,
+        websiteReachable: health.reachable,
+        websiteProblem: health.problem,
         score: report?.score.total || business.automationScore,
         moneyOpportunity: report?.money.monthlyOpportunity || 0,
-        topPriority: report?.priorities?.[0]?.title || (business.website ? "Ждет аудита" : "Нет сайта в OSM")
+        topPriority: health.bad
+          ? health.problem
+          : report?.priorities?.[0]?.title || (business.website ? "Ждет аудита" : "Нет сайта в OSM")
       };
     })
     .sort((a, b) => {
@@ -1083,18 +1208,24 @@ function buildMoneyMachineLeads(businesses, reports, payload, machine) {
 }
 
 function buildMoneyMachineLead(business, report, payload, machine, index) {
-  const issue = detectLeadIssue(business, report);
+  const health = getWebsiteHealth(business, report);
+  const issue = detectLeadIssue(business, report, health);
   const offer = buildServiceOffer(issue, payload, machine);
-  const contactRoute = pickContactRoute(business);
+  const contactRoute = pickContactRoute(business, health);
   const clientOpportunity = estimateClientOpportunity(business, report, payload, issue);
   const estimatedDealValue = offer.price + offer.monthly * 2;
-  const moneyScore = scoreMoneyLead(business, report, payload, issue, offer);
+  const moneyScore = scoreMoneyLead(business, report, payload, issue, offer, health);
   const priority = moneyScore >= 78 ? "hot" : moneyScore >= 58 ? "warm" : "cold";
-  const pitch = createLeadPitch(business, report, issue, offer, clientOpportunity);
+  const outreach = createLeadOutreach(business, report, issue, offer, health);
+  const pitch = outreach.email;
 
   return {
     ...business,
     rank: index + 1,
+    websiteChecked: health.checked,
+    websiteStatus: health.status,
+    websiteReachable: health.reachable,
+    websiteProblem: health.problem,
     moneyScore,
     priority,
     contactRoute,
@@ -1106,15 +1237,34 @@ function buildMoneyMachineLead(business, report, payload, machine, index) {
     clientOpportunity,
     recommendedAction: createRecommendedAction(business, issue, contactRoute),
     pitch,
+    outreach,
     nextSteps: createLeadNextSteps(business, issue, offer),
-    evidence: createLeadEvidence(business, report, issue),
+    evidence: createLeadEvidence(business, report, issue, health),
     topPriority: issue.title,
     moneyOpportunity: clientOpportunity,
     score: report?.score?.total || business.score || moneyScore
   };
 }
 
-function detectLeadIssue(business, report) {
+function getWebsiteHealth(business, report) {
+  const facts = report?.facts || {};
+  const status = Number(facts.status || business.websiteStatus || 0);
+  const checked = Boolean(report || business.websiteChecked);
+  const bad = Boolean(business.website && isDefinitelyBadWebsiteStatus(status));
+  const reachable = bad ? false : business.websiteReachable ?? (status >= 200 && status < 400 ? true : null);
+  const problem = bad
+    ? `Сайт отдает HTTP ${status}`
+    : business.websiteProblem || (facts.fetchError ? `Проверка сайта: ${facts.fetchError}` : "");
+  return {
+    checked,
+    status,
+    bad,
+    reachable,
+    problem
+  };
+}
+
+function detectLeadIssue(business, report, health = getWebsiteHealth(business, report)) {
   const facts = report?.facts || {};
   const priority = report?.priorities?.[0];
   if (!business.website) {
@@ -1123,6 +1273,14 @@ function detectLeadIssue(business, report) {
       title: "Нет сайта в открытых данных",
       severity: "high",
       reason: "Лид можно продавать как быстрый сайт/лендинг с заявкой и картой."
+    };
+  }
+  if (health.bad) {
+    return {
+      key: "site_error",
+      title: health.problem,
+      severity: "high",
+      reason: "В открытых данных есть сайт, но публичная ссылка выглядит сломанной."
     };
   }
   if (priority) {
@@ -1167,6 +1325,12 @@ function buildServiceOffer(issue, payload, machine) {
       monthly,
       scope: "1-страничный сайт, мобильная заявка, карта, телефон, базовое SEO"
     },
+    site_error: {
+      name: "Website Recovery",
+      price: roundToNearest(Math.max(390, averageSale * 0.8), 10),
+      monthly: Math.round(monthly * 0.45),
+      scope: "Проверка публичных ссылок, редиректы, 404, рабочая посадочная страница и CTA"
+    },
     contact: {
       name: "Lead Capture Fix",
       price: roundToNearest(Math.max(290, averageSale * 0.9), 10),
@@ -1207,18 +1371,19 @@ function buildServiceOffer(issue, payload, machine) {
   };
 }
 
-function scoreMoneyLead(business, report, payload, issue, offer) {
+function scoreMoneyLead(business, report, payload, issue, offer, health = getWebsiteHealth(business, report)) {
   const hasDirectContact = Boolean(business.email || business.phone);
   const hasMap = Boolean(business.mapUrl || business.osmUrl);
   const averageSale = Number(payload.averageSale || 300);
   let score = 34;
   score += hasDirectContact ? 18 : hasMap ? 8 : 0;
-  score += business.website ? 8 : 18;
+  score += health.reachable === true ? 16 : business.website && health.reachable !== false ? 10 : business.website ? -4 : 4;
   score += issue.severity === "high" ? 18 : issue.severity === "medium" ? 10 : 4;
   score += report?.score?.total && report.score.total < 62 ? 12 : 0;
   score += report?.money?.monthlyOpportunity > averageSale * 3 ? 10 : 0;
   score += averageSale >= 700 ? 8 : averageSale >= 300 ? 5 : 1;
   score += offer.price >= 600 ? 6 : 2;
+  if (health.bad && !hasDirectContact) score -= 10;
   return clampNumber(score, 1, 100, 50);
 }
 
@@ -1232,31 +1397,123 @@ function estimateClientOpportunity(business, report, payload, issue) {
   return roundToNearest(Math.max(averageSale * (baseLeads + contactLift), averageSale * 1.4), 10);
 }
 
-function pickContactRoute(business) {
+function pickContactRoute(business, health = getWebsiteHealth(business, null)) {
   if (business.email) return "email";
   if (business.phone) return "phone";
-  if (business.website) return "website";
+  if (business.website && health.reachable !== false) return "website";
   if (business.mapUrl || business.osmUrl) return "map";
   return "research";
 }
 
 function createRecommendedAction(business, issue, contactRoute) {
+  if (issue.key === "site_error") return "Проверить публичную ссылку, открыть карту/Google и писать только с screenshot-доказательством";
   if (contactRoute === "email") return `Отправить email про: ${issue.title}`;
   if (contactRoute === "phone") return `Позвонить и предложить: ${issue.title}`;
   if (business.website) return `Открыть сайт и найти контакт для оффера: ${issue.title}`;
   return "Открыть карту, найти телефон/сайт и предложить стартовый сайт";
 }
 
-function createLeadPitch(business, report, issue, offer, clientOpportunity) {
+function createLeadOutreach(business, report, issue, offer, health = getWebsiteHealth(business, report)) {
   const location = [business.city, business.country].filter(Boolean).join(", ");
-  const host = report?.host || (business.website ? new URL(business.website).hostname : "your business");
-  if (!business.website) {
-    return `Hi ${business.name}, I found your ${business.niche || "local service"} business in ${location}. I could not find a clear website, so mobile customers may leave before calling. I can build a simple booking-ready page with map, phone and request form for about $${offer.price}. Want me to send a quick mockup?`;
+  const host = safeHostFromUrl(report?.finalUrl || business.website || "");
+  const niche = humanNiche(business.niche);
+  const issueTitle = outboundIssueTitle(issue);
+  const subject = issue.key === "site_error"
+    ? `Public website link for ${business.name}`
+    : `Small website fix for ${business.name}`;
+
+  if (issue.key === "site_error") {
+    const statusText = health.status ? `HTTP ${health.status}` : "did not load";
+    const statusSentence = health.status
+      ? `The website link I found${host ? ` (${host})` : ""} returned ${statusText} from my check.`
+      : `The website link I found${host ? ` (${host})` : ""} did not load from my check.`;
+    const email = [
+      `Subject: ${subject}`,
+      "",
+      `Hi ${business.name} team,`,
+      "",
+      `I found your public listing${location ? ` in ${location}` : ""} while checking ${niche} businesses.`,
+      statusSentence,
+      "",
+      "I do not want to assume it is broken for every visitor, but if this is the same link customers see from search or maps, it is worth fixing before talking about design or ads.",
+      "",
+      "I can send a short screenshot note with:",
+      "- the exact public link I checked",
+      "- what looks broken",
+      "- the first fix I would make",
+      "",
+      `If it is still public, I can clean it up as a small fixed-price ${offer.name}. If the link is outdated, you can ignore it.`,
+      "",
+      "Should I send the screenshot note?"
+    ].join("\n");
+    const shortStatus = health.status ? `returned ${statusText}` : "did not load from my check";
+    return {
+      subject,
+      email,
+      followUp: `Quick follow-up on ${business.name}: the public website link I found ${shortStatus}. I can send the screenshot and exact link first, no redesign pitch.`,
+      dm: `Quick note: the public website link I found for ${business.name} ${shortStatus}. Want me to send the screenshot and exact link?`,
+      callScript: `Say: I found your public listing and the website link ${shortStatus}. I can send the screenshot so you can check if that link is still active.`
+    };
   }
-  return `Hi ${business.name}, I checked ${host}. The fastest revenue leak I found is: ${issue.title}. For a ${business.niche || "local"} business this can easily mean around $${clientOpportunity}/mo in missed demand. I can fix it as a small ${offer.name} for about $${offer.price}, no full redesign needed. Want me to send the exact 3 fixes?`;
+
+  if (!business.website) {
+    const email = [
+      `Subject: ${subject}`,
+      "",
+      `Hi ${business.name} team,`,
+      "",
+      `I found your public listing${location ? ` in ${location}` : ""} while checking ${niche} businesses.`,
+      "I could not find a clear working website from the listing, so I would not pitch a redesign. The useful first step would be a simple service page that gives mobile visitors three things fast: phone, map, and a request form.",
+      "",
+      `I can send a quick mockup/screenshot plan first. If it makes sense, I can build it as a fixed-price ${offer.name}.`,
+      "",
+      "Should I send the mockup?"
+    ].join("\n");
+    return {
+      subject,
+      email,
+      followUp: `Quick follow-up on ${business.name}: I could not find a clear working website from the public listing. I can send a simple mockup first so you can judge it before talking about any work.`,
+      dm: `Quick note: I found your listing but could not find a clear working website. Want me to send a simple mockup idea?`,
+      callScript: "Say: I found your listing, but could not find a clear working site from it. I can send a simple mockup with phone, map and request form."
+    };
+  }
+
+  const fixLines = offer.scope
+    ? outboundFixLines(issue, offer)
+    : [`- ${issueTitle}`];
+  const email = [
+    `Subject: ${subject}`,
+    "",
+    `Hi ${business.name} team,`,
+    "",
+    `I found your business${location ? ` in ${location}` : ""} and opened ${host || "your website"}. One practical thing stood out: ${issueTitle}.`,
+    "",
+    "I am not pitching a full redesign. The useful first step would be small and easy to judge:",
+    ...fixLines,
+    "",
+    "I can send a 1-page screenshot plan showing the issue, the fix, and what I would change first. If it looks useful, I can implement it as a fixed-price quick sprint.",
+    "",
+    "Should I send the screenshot plan?"
+  ].join("\n");
+
+  return {
+    subject,
+    email,
+    followUp: `Quick follow-up on ${business.name}: I found one small website fix worth checking (${issueTitle}). I can send the screenshot plan first so you can judge it before talking about any work.`,
+    dm: `Quick note: I opened ${host || "your website"} and found one practical website fix: ${issueTitle}. Want me to send the screenshot plan?`,
+    callScript: `Say: I opened the site and found one small fix around ${issueTitle}. I can send a screenshot first so you can see exactly what I mean.`
+  };
 }
 
 function createLeadNextSteps(business, issue, offer) {
+  if (issue.key === "site_error") {
+    return [
+      "Открыть Google/карту и проверить, та ли ссылка видна клиентам",
+      "Скопировать письмо только со screenshot-доказательством 404",
+      `Предложить ${offer.name}: исправить публичную ссылку и точку входа`,
+      "Через 48 часов отправить follow-up с коротким screenshot"
+    ];
+  }
   return [
     business.website ? "Открыть сайт и проверить контакт владельца" : "Открыть карту и найти телефон/сайт",
     `Предложить ${offer.name}: ${issue.title}`,
@@ -1265,9 +1522,15 @@ function createLeadNextSteps(business, issue, offer) {
   ];
 }
 
-function createLeadEvidence(business, report, issue) {
+function createLeadEvidence(business, report, issue, health = getWebsiteHealth(business, report)) {
   const items = [
-    business.website ? "Сайт найден" : "Сайт не найден в OSM",
+    business.website
+      ? health.bad
+        ? `Сайт найден, но ${health.problem}`
+        : health.reachable
+          ? `Сайт проверен: HTTP ${health.status || 200}`
+          : "Сайт найден, нужна ручная проверка"
+      : "Сайт не найден в OSM",
     business.phone ? "Есть телефон" : "Телефон не найден",
     business.email ? "Есть email" : "Email не найден",
     issue.reason
@@ -1275,6 +1538,63 @@ function createLeadEvidence(business, report, issue) {
   if (report?.score?.total) items.push(`Аудит сайта: ${report.score.total}/100`);
   if (report?.money?.monthlyOpportunity) items.push(`Оценка утечки: $${Math.round(report.money.monthlyOpportunity)}/мес`);
   return items.filter(Boolean);
+}
+
+function safeHostFromUrl(value) {
+  try {
+    return new URL(value).hostname.replace(/^www\./, "");
+  } catch {
+    return "";
+  }
+}
+
+function humanNiche(value) {
+  const key = String(value || "local service").toLowerCase();
+  const labels = [
+    [/plumb|сантех/, "plumbing"],
+    [/dent|стомат|зуб/, "dental"],
+    [/law|legal|юрист|адвокат/, "legal"],
+    [/restaurant|cafe|food|ресторан|кафе/, "restaurant"],
+    [/salon|beauty|hair|barber/, "beauty"],
+    [/hvac|heating|air condition/, "HVAC"],
+    [/roof|крыш|кров/, "roofing"]
+  ];
+  return labels.find(([pattern]) => pattern.test(key))?.[1] || key;
+}
+
+function outboundIssueTitle(issue) {
+  const titles = {
+    no_website: "I could not find a clear working website from the public listing",
+    site_error: "the public website link appears to be broken",
+    contact: "the site does not make the next contact step obvious enough",
+    booking: "there is no simple request or booking step near the first visit",
+    cta: "the main call-to-action is easy to miss",
+    proof: "trust proof is not close enough to the request step",
+    local: "the local service information could be clearer",
+    schema: "the local business data could be cleaner for search",
+    "mobile-security": "the mobile or security basics need cleanup",
+    speed: "the page feels heavier than it needs to be",
+    images: "the images are not helping local search enough",
+    growth: "the site is decent, but the request path can be measured and improved",
+    conversion: "the request path can be made clearer"
+  };
+  return titles[issue?.key] || String(issue?.title || "one practical website fix").toLowerCase();
+}
+
+function outboundFixLines(issue, offer) {
+  const lines = {
+    contact: ["- make the phone/request action visible above the fold", "- add one short form or click-to-call path", "- place trust proof next to the action"],
+    booking: ["- add a short request or booking form", "- keep it to name, phone, service needed, and preferred time", "- route the request to the owner immediately"],
+    cta: ["- make one primary call-to-action obvious", "- repeat it after proof and at the bottom", "- remove competing actions from the first screen"],
+    proof: ["- move reviews or proof closer to the request step", "- add a short guarantee or credibility block", "- make the first screen feel safer for a cold visitor"],
+    local: ["- make city and service area clearer", "- add map/hours/service-area proof", "- connect the page to local search intent"],
+    schema: ["- add LocalBusiness/service structured data", "- clean up phone, address, and service fields", "- make the business easier to understand for search engines"],
+    "mobile-security": ["- fix mobile viewport and HTTPS basics", "- check redirects and security headers", "- make the first screen usable on a phone"],
+    speed: ["- compress heavy assets", "- remove unnecessary scripts", "- improve mobile load speed"],
+    images: ["- add useful alt text", "- connect images to service and city terms", "- make image proof support the offer"],
+    growth: ["- measure the primary request action", "- test one stronger call-to-action", "- add a simple lead follow-up path"]
+  };
+  return lines[issue?.key] || [offer?.scope ? `- ${offer.scope}` : "- send a screenshot plan with the first fix"];
 }
 
 function summarizeMoneyPipeline(leads) {
@@ -1305,7 +1625,7 @@ function nicheToOverpassFilters(niche) {
   if (/dent|стомат|зуб/.test(key)) return ['["amenity"="dentist"]'];
   if (/doctor|clinic|medical|врач|клиник|медиц/.test(key)) return ['["amenity"="clinic"]', '["amenity"="doctors"]', '["healthcare"]'];
   if (/vet|animal|вет/.test(key)) return ['["amenity"="veterinary"]'];
-  if (/plumb|сантех/.test(key)) return ['["craft"="plumber"]', '["shop"="bathroom_furnishing"]'];
+  if (/plumb|сантех/.test(key)) return ['["craft"="plumber"]'];
   if (/electric|электр/.test(key)) return ['["craft"="electrician"]'];
   if (/hvac|air condition|heating|кондиционер|отоплен/.test(key)) return ['["craft"="hvac"]', '["shop"="air_conditioning"]'];
   if (/clean|уборк|клининг/.test(key)) return ['["craft"="cleaning"]', '["shop"="dry_cleaning"]', '["shop"="laundry"]'];
@@ -1356,6 +1676,37 @@ function businessNicheFit(tags, niche) {
     : 12;
 }
 
+function isRelevantBusinessForNiche(business, niche) {
+  if (!business?.name) return false;
+  const key = String(niche || "").toLowerCase();
+  const tags = business.tags || {};
+  const haystack = [
+    business.name,
+    business.niche,
+    business.address,
+    tags.amenity,
+    tags.shop,
+    tags.office,
+    tags.craft,
+    tags.leisure,
+    tags.tourism,
+    tags.healthcare,
+    tags.social_facility,
+    tags.brand
+  ]
+    .filter(Boolean)
+    .join(" ")
+    .toLowerCase();
+
+  if (/plumb|сантех/.test(key)) {
+    const serviceMatch = /plumb|drain|sewer|pipe|water heater|rooter|leak|emergency|repair|service/.test(haystack);
+    const supplierOnly = /showroom|supply|supplier|fixture|bathroom|kitchen|tile|wholesale|distributor/.test(haystack);
+    return tags.craft === "plumber" || (serviceMatch && !supplierOnly);
+  }
+
+  return true;
+}
+
 function compactTags(tags) {
   const allowed = ["amenity", "shop", "office", "craft", "leisure", "sport", "tourism", "healthcare", "social_facility", "brand"];
   return Object.fromEntries(allowed.filter((key) => tags[key]).map((key) => [key, tags[key]]));
@@ -1384,6 +1735,25 @@ async function fetchWithTimeout(url, options = {}, timeoutMs = 12000, retries = 
     }
   }
   throw lastError || new Error("fetch failed");
+}
+
+async function readTextWithTimeout(response, timeoutMs = 12000) {
+  let timeout = null;
+  try {
+    return await Promise.race([
+      response.text(),
+      new Promise((_, reject) => {
+        timeout = setTimeout(() => reject(new Error(`response body timeout after ${timeoutMs}ms`)), timeoutMs);
+      })
+    ]);
+  } finally {
+    if (timeout) clearTimeout(timeout);
+  }
+}
+
+async function readJsonWithTimeout(response, timeoutMs = 12000) {
+  const text = await readTextWithTimeout(response, timeoutMs);
+  return JSON.parse(text);
 }
 
 function delay(ms) {

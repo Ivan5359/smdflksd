@@ -181,7 +181,7 @@ function App() {
         const response = await fetch("/api/jobs/latest?type=lead-machine", { cache: "no-store" });
         const payload = await response.json();
         if (cancelled) return;
-        if (!payload.job) {
+        if (!isCurrentJob(payload.job)) {
           clearBackgroundJob();
           resetMoneyMachine();
           return;
@@ -264,11 +264,12 @@ function App() {
   const filteredDiscovery = useMemo(() => {
     const query = leadFilter.query.trim().toLowerCase();
     const filtered = rankedDiscovery.filter((business) => {
-      const haystack = `${business.name || ""} ${business.city || ""} ${business.country || ""} ${business.website || ""} ${business.topPriority || ""}`.toLowerCase();
+      const normalized = normalizeLead(business);
+      const haystack = `${normalized.name || ""} ${normalized.city || ""} ${normalized.country || ""} ${normalized.website || ""} ${normalized.topPriority || ""}`.toLowerCase();
       if (query && !haystack.includes(query)) return false;
-      if (leadFilter.onlyWebsite && !business.website) return false;
-      if (leadFilter.onlySaved && !savedLeadIds.has(business.id)) return false;
-      if ((business.score || 0) < Number(leadFilter.minScore || 0)) return false;
+      if (leadFilter.onlyWebsite && !getLeadLinks(normalized).website) return false;
+      if (leadFilter.onlySaved && !savedLeadIds.has(normalized.id)) return false;
+      if ((normalized.score || 0) < Number(leadFilter.minScore || 0)) return false;
       return true;
     });
 
@@ -280,9 +281,9 @@ function App() {
   }, [leadFilter, rankedDiscovery, savedLeadIds]);
 
   const pipelineStats = useMemo(() => {
-    const leads = rankedDiscovery.length ? rankedDiscovery : savedLeads;
+    const leads = (rankedDiscovery.length ? rankedDiscovery : savedLeads).map(normalizeLead);
     const total = leads.length;
-    const withWebsite = leads.filter((lead) => lead.website).length;
+    const withWebsite = leads.filter((lead) => getLeadLinks(lead).website).length;
     const highScore = leads.filter((lead) => (lead.score || 0) >= 75).length;
     return [
       { label: "Найдено", value: total },
@@ -454,7 +455,10 @@ function App() {
   }
 
   function rememberBackgroundJob(job) {
-    if (!job) return;
+    if (!isCurrentJob(job)) {
+      clearBackgroundJob();
+      return;
+    }
     setBackgroundJob(job);
     writeLocal("sitemoney.backgroundJob", job);
   }
@@ -472,6 +476,10 @@ function App() {
 
   function applyMoneyMachineData(data, sourceJob = null, notify = true) {
     if (!data) return;
+    if (!isCurrentMoneyMachineData(data)) {
+      resetMoneyMachine();
+      return;
+    }
     const nextMachine = {
       ...data,
       jobId: sourceJob?.id || data.jobId || ""
@@ -516,8 +524,20 @@ function App() {
     try {
       const response = await fetch(`/api/jobs/${encodeURIComponent(jobId)}`, { cache: "no-store" });
       const payload = await response.json();
-      if (!response.ok) throw new Error(payload.error || "Job status failed");
+      if (!response.ok) {
+        if (response.status === 404 || response.status === 410) {
+          clearBackgroundJob();
+          resetMoneyMachine();
+          return;
+        }
+        throw new Error(payload.error || "Job status failed");
+      }
       const job = payload.job;
+      if (!isCurrentJob(job)) {
+        clearBackgroundJob();
+        resetMoneyMachine();
+        return;
+      }
       rememberBackgroundJob(job);
       const active = ["queued", "running"].includes(job.status);
       setMoneyLoading(active);
@@ -629,7 +649,7 @@ function App() {
   }
 
   function addFilteredWebsitesToQueue() {
-    const websites = filteredDiscovery.map((lead) => lead.website).filter(Boolean);
+    const websites = filteredDiscovery.map((lead) => getLeadLinks(lead).website).filter(Boolean);
     if (!websites.length) return;
     setQueueText((current) => mergeLines(current, websites).join("\n"));
     setCopied("queue");
@@ -760,23 +780,25 @@ function App() {
   }
 
   async function copyLeadBrief(business) {
-    if (business.pitch) {
-      await copyText(`lead-${business.id}`, business.pitch);
+    const normalized = normalizeLead(business);
+    const ownerEmail = ownerEmailForLead(normalized);
+    if (ownerEmail) {
+      await copyText(`lead-${normalized.id}`, ownerEmail);
       return;
     }
     const text = [
-      `${business.name}`,
-      [business.city, business.country].filter(Boolean).join(", "),
-      business.website ? `Site: ${business.website}` : "Site: not found",
-      business.phone ? `Phone: ${business.phone}` : "",
-      business.email ? `Email: ${business.email}` : "",
-      `Score: ${business.score || 0}`,
-      business.moneyOpportunity ? `Potential: ${money(business.moneyOpportunity)}/mo` : "",
-      `Hook: ${business.topPriority || "Нужен аудит"}`
+      `${normalized.name}`,
+      [normalized.city, normalized.country].filter(Boolean).join(", "),
+      normalized.website ? `Site: ${normalized.website}` : "Site: not found",
+      normalized.websiteReachable === false ? `Website problem: ${normalized.websiteProblem || `HTTP ${normalized.websiteStatus}`}` : "",
+      normalized.phone ? `Phone: ${normalized.phone}` : "",
+      normalized.email ? `Email: ${normalized.email}` : "",
+      `Score: ${normalized.score || 0}`,
+      `Hook: ${normalized.topPriority || "Нужен аудит"}`
     ]
       .filter(Boolean)
       .join("\n");
-    await copyText(`lead-${business.id}`, text);
+    await copyText(`lead-${normalized.id}`, text);
   }
 
   function updateCrmStatus(id, status) {
@@ -796,12 +818,31 @@ function App() {
   }
 
   async function copyText(label, value) {
+    const text = String(value || "");
     try {
-      await navigator.clipboard.writeText(value);
+      if (!navigator.clipboard?.writeText) throw new Error("Clipboard API is unavailable");
+      await navigator.clipboard.writeText(text);
       setCopied(label);
       window.setTimeout(() => setCopied(""), 1400);
     } catch {
-      setError("Браузер не дал доступ к clipboard. Используй экспорт TXT/CSV или выдели текст вручную.");
+      try {
+        const textarea = document.createElement("textarea");
+        textarea.value = text;
+        textarea.setAttribute("readonly", "");
+        textarea.style.position = "fixed";
+        textarea.style.left = "-9999px";
+        textarea.style.top = "0";
+        document.body.appendChild(textarea);
+        textarea.focus();
+        textarea.select();
+        const copiedOk = document.execCommand("copy");
+        document.body.removeChild(textarea);
+        if (!copiedOk) throw new Error("Copy command failed");
+        setCopied(label);
+        window.setTimeout(() => setCopied(""), 1400);
+      } catch {
+        setError("Браузер не дал доступ к clipboard. Используй TXT pack, CSV или выдели текст вручную.");
+      }
     }
   }
 
@@ -1460,7 +1501,7 @@ function App() {
             <div className="stream-head">
               <SectionTitle icon={<Bot size={18} />} title="Найденные бизнесы автопилотом" inline />
               <div className="stream-actions">
-                <button className="secondary-button" onClick={addFilteredWebsitesToQueue} disabled={!filteredDiscovery.some((lead) => lead.website)}>
+                <button className="secondary-button" onClick={addFilteredWebsitesToQueue} disabled={!filteredDiscovery.some((lead) => getLeadLinks(lead).website)}>
                   <Plus size={15} />
                   В очередь
                 </button>
@@ -1499,43 +1540,41 @@ function App() {
               />
             </div>
             <div className="stream-list">
-              {filteredDiscovery.slice(0, 10).map((business) => (
-                <article key={business.id}>
-                  <div className="stream-score">{business.score || 0}</div>
-                  <div>
-                    <strong>{business.name}</strong>
-                    <span>{[business.city, business.country].filter(Boolean).join(", ") || business.website}</span>
-                  </div>
-                  <div>
-                    <b>{business.website ? "сайт есть" : "сайт не найден"}</b>
-                    <span>{business.topPriority}</span>
-                  </div>
-                  {business.website ? (
-                    <a href={business.website} target="_blank" rel="noreferrer">
-                      сайт
-                    </a>
-                  ) : (
-                    <a href={business.osmUrl} target="_blank" rel="noreferrer">
-                      карта
-                    </a>
-                  )}
-                  <div className="lead-actions">
-                    <button
-                      type="button"
-                      onClick={() => saveBusinessLead(business)}
-                      aria-label={savedLeadIds.has(business.id) ? "Лид сохранен" : "Сохранить лид"}
-                    >
-                      {savedLeadIds.has(business.id) ? "✓" : "Сохр"}
-                    </button>
-                    <button type="button" onClick={() => addBusinessToCrm(business)}>
-                      CRM
-                    </button>
-                    <button type="button" onClick={() => copyLeadBrief(business)}>
-                      Копия
-                    </button>
-                  </div>
-                </article>
-              ))}
+              {filteredDiscovery.slice(0, 10).map((business) => {
+                const normalized = normalizeLead(business);
+                const links = getLeadLinks(normalized);
+                return (
+                  <article key={normalized.id}>
+                    <div className="stream-score">{normalized.score || 0}</div>
+                    <div>
+                      <strong>{normalized.name}</strong>
+                      <span>{[normalized.city, normalized.country].filter(Boolean).join(", ") || normalized.website}</span>
+                    </div>
+                    <div>
+                      <b>{websiteStatusLabel(normalized)}</b>
+                      <span>{normalized.topPriority}</span>
+                    </div>
+                    <ActionLink href={links.website || links.map || links.osm || links.search}>
+                      {links.website ? "сайт" : links.map || links.osm ? "карта" : "поиск"}
+                    </ActionLink>
+                    <div className="lead-actions">
+                      <button
+                        type="button"
+                        onClick={() => saveBusinessLead(normalized)}
+                        aria-label={savedLeadIds.has(normalized.id) ? "Лид сохранен" : "Сохранить лид"}
+                      >
+                        {savedLeadIds.has(normalized.id) ? "✓" : "Сохр"}
+                      </button>
+                      <button type="button" onClick={() => addBusinessToCrm(normalized)}>
+                        CRM
+                      </button>
+                      <button type="button" onClick={() => copyLeadBrief(normalized)}>
+                        Копия
+                      </button>
+                    </div>
+                  </article>
+                );
+              })}
               {!filteredDiscovery.length ? (
                 <p className="empty-state">Пока нет лидов под фильтр. Запусти поиск или снизь ограничения.</p>
               ) : null}
@@ -1829,25 +1868,27 @@ function crmFromReport(report) {
 }
 
 function crmFromBusiness(business) {
+  const normalized = normalizeLead(business);
+  const links = getLeadLinks(normalized);
   return {
-    id: `lead-${business.id}`,
-    host: business.website ? safeHost(business.website) : business.name,
+    id: `lead-${normalized.id}`,
+    host: links.website ? safeHost(links.website) : normalized.name,
     status: "Новый",
-    value: business.estimatedDealValue || business.moneyOpportunity || 0,
+    value: normalized.estimatedDealValue || normalized.moneyOpportunity || 0,
     nextAction:
-      business.recommendedAction ||
-      (business.website
-        ? `Открыть аудит и написать про: ${business.topPriority || "быстрый рост заявок"}`
+      normalized.recommendedAction ||
+      (links.website
+        ? `Открыть аудит и написать про: ${normalized.topPriority || "быстрый рост заявок"}`
         : "Найти сайт или написать через телефон/карту"),
     followUpInHours: 48,
     tags: [
-      business.niche || "lead",
-      business.city || "",
-      business.priority || "",
-      business.serviceOffer?.name || "",
-      business.website ? "has-site" : "no-site"
+      normalized.niche || "lead",
+      normalized.city || "",
+      normalized.priority || "",
+      normalized.serviceOffer?.name || "",
+      links.website ? "has-site" : normalized.websiteReachable === false ? "bad-site" : "no-site"
     ].filter(Boolean),
-    pitch: business.pitch || ""
+    pitch: ownerEmailForLead(normalized)
   };
 }
 
@@ -1861,13 +1902,19 @@ function mergeLeads(incoming, current) {
 }
 
 function normalizeLead(lead) {
-  return {
+  const safeOutreach = sanitizeLeadOutreach(lead.outreach);
+  const safePitch = isLegacyOutreachText(lead.pitch) ? "" : String(lead.pitch || "");
+  const normalized = {
     id: lead.id || `${lead.name}-${lead.website || lead.osmUrl || Date.now()}`,
     name: lead.name || "Unknown business",
     city: lead.city || "",
     country: lead.country || "",
     address: lead.address || "",
     website: lead.website || "",
+    websiteChecked: Boolean(lead.websiteChecked),
+    websiteStatus: Number(lead.websiteStatus || 0),
+    websiteReachable: lead.websiteReachable === false ? false : lead.websiteReachable === true ? true : null,
+    websiteProblem: lead.websiteProblem || "",
     phone: lead.phone || "",
     email: lead.email || "",
     osmUrl: lead.osmUrl || lead.mapUrl || "",
@@ -1884,7 +1931,8 @@ function normalizeLead(lead) {
     serviceOffer: lead.serviceOffer || null,
     issue: lead.issue || null,
     recommendedAction: lead.recommendedAction || "",
-    pitch: lead.pitch || "",
+    pitch: safeOutreach?.email || safePitch,
+    outreach: safeOutreach,
     evidence: lead.evidence || [],
     nextSteps: lead.nextSteps || [],
     topPriority: lead.topPriority || lead.suggestedAction || "Ждет аудита",
@@ -1892,6 +1940,24 @@ function normalizeLead(lead) {
     tags: lead.tags || {},
     savedAt: lead.savedAt || new Date().toISOString()
   };
+  if (!normalized.pitch) normalized.pitch = buildLeadPitchFromFields(normalized);
+  return normalized;
+}
+
+const LEGACY_OUTREACH_PATTERN = /fastest revenue leak|missed demand|exact 3 fixes|For a .+ business this can easily mean|Нет формы заявки/i;
+
+function isLegacyOutreachText(value) {
+  return LEGACY_OUTREACH_PATTERN.test(String(value || ""));
+}
+
+function sanitizeLeadOutreach(outreach) {
+  if (!outreach || typeof outreach !== "object") return null;
+  const next = { ...outreach };
+  for (const key of ["email", "followUp", "dm", "telegram", "callScript"]) {
+    if (isLegacyOutreachText(next[key])) next[key] = "";
+  }
+  if (next.email || next.followUp || next.dm || next.telegram || next.callScript) return next;
+  return null;
 }
 
 function mergeLines(current, additions) {
@@ -1929,14 +1995,19 @@ function removeLocal(key) {
 
 function readInitialBackgroundJob() {
   const savedJob = readLocal("sitemoney.backgroundJob", null);
-  return savedJob?.id ? savedJob : null;
+  return isCurrentJob(savedJob) ? savedJob : null;
 }
 
 function readInitialMoneyMachine() {
   const savedJob = readInitialBackgroundJob();
   const savedMachine = readLocal("sitemoney.moneyMachine", emptyMoneyMachine);
   const machineJobId = savedMachine?.jobId || "";
-  const hasServerBackedResult = Boolean(savedJob?.id && machineJobId && machineJobId === savedJob.id);
+  const hasServerBackedResult = Boolean(
+    savedJob?.id &&
+      machineJobId &&
+      machineJobId === savedJob.id &&
+      isCurrentMoneyMachineData(savedMachine)
+  );
   if (!hasServerBackedResult) {
     removeLocal("sitemoney.moneyMachine");
     return emptyMoneyMachine;
@@ -1945,6 +2016,15 @@ function readInitialMoneyMachine() {
     ...emptyMoneyMachine,
     ...savedMachine
   };
+}
+
+function isCurrentJob(job) {
+  if (!job) return false;
+  return job.appVersion === APP_VERSION || job.result?.version === APP_VERSION;
+}
+
+function isCurrentMoneyMachineData(data) {
+  return Boolean(data && data.version === APP_VERSION);
 }
 
 function jobStatusLabel(status) {
@@ -1971,6 +2051,14 @@ function formatJobTime(value) {
   } catch {
     return String(value);
   }
+}
+
+function websiteStatusLabel(leadInput) {
+  const lead = normalizeLead(leadInput || {});
+  if (!lead.website) return "сайт не найден";
+  if (lead.websiteReachable === false) return lead.websiteStatus ? `сайт ${lead.websiteStatus}` : "сайт ошибка";
+  if (lead.websiteReachable === true) return lead.websiteStatus ? `сайт проверен ${lead.websiteStatus}` : "сайт проверен";
+  return "сайт требует проверки";
 }
 
 function money(value) {
@@ -2006,12 +2094,12 @@ function safeExternalUrl(value) {
 
 function getLeadLinks(leadInput) {
   const lead = normalizeLead(leadInput || {});
-  const website = safeExternalUrl(lead.website);
+  const website = lead.websiteReachable === false ? "" : safeExternalUrl(lead.website);
   const osm = safeExternalUrl(lead.osmUrl);
   const map = safeExternalUrl(lead.mapUrl);
   const search = buildLeadSearchUrl(lead);
   const email = lead.email
-    ? `mailto:${lead.email}?subject=${encodeURIComponent(`Quick fix for ${lead.name}`)}&body=${encodeURIComponent(lead.pitch || buildLeadPitchFallback(lead))}`
+    ? `mailto:${lead.email}?subject=${encodeURIComponent(lead.outreach?.subject || `Website note for ${lead.name}`)}&body=${encodeURIComponent(ownerEmailForLead(lead))}`
     : "";
   const phoneDigits = String(lead.phone || "").replace(/[^\d+]/g, "");
   const phone = phoneDigits.length >= 7 ? `tel:${phoneDigits}` : "";
@@ -2036,11 +2124,78 @@ function buildLeadSearchUrl(leadInput) {
 
 function buildLeadPitchFallback(leadInput) {
   const lead = normalizeLead(leadInput || {});
+  return buildLeadPitchFromFields(lead);
+}
+
+function buildLeadPitchFromFields(lead) {
   const location = [lead.city, lead.country].filter(Boolean).join(", ");
-  const offer = lead.serviceOffer?.name || "Conversion Sprint";
-  const price = lead.serviceOffer?.price || lead.estimatedDealValue || 390;
-  const issue = lead.opportunity || lead.topPriority || "lead capture gap";
-  return `Hi ${lead.name}, I found your ${lead.niche || "local service"} business${location ? ` in ${location}` : ""}. The fastest revenue leak I see is: ${issue}. I can package a small ${offer} for about $${price}. Want me to send the exact 3 fixes?`;
+  const issue = ownerSafeIssueTitle(lead.opportunity || lead.topPriority || "one small website issue");
+  if (lead.websiteReachable === false) {
+    const statusPhrase = lead.websiteStatus ? `returned HTTP ${lead.websiteStatus}` : "did not load from my check";
+    return [
+      `Subject: Public website link for ${lead.name}`,
+      "",
+      `Hi ${lead.name} team,`,
+      "",
+      `I found your public listing${location ? ` in ${location}` : ""}. The website link I found ${statusPhrase}.`,
+      "",
+      "I do not want to assume it is broken for every visitor, but if that is the same link customers see from search or maps, it is worth fixing before talking about design or ads.",
+      "",
+      "I can send a short screenshot note with the exact link I checked and the first fix I would make.",
+      "",
+      "Should I send the screenshot note?"
+    ].join("\n");
+  }
+  if (!lead.website) {
+    return [
+      `Subject: Small website idea for ${lead.name}`,
+      "",
+      `Hi ${lead.name} team,`,
+      "",
+      `I found your public listing${location ? ` in ${location}` : ""}, but I could not find a clear working website from it.`,
+      "",
+      "The useful first step would be a simple service page with phone, map, and a short request form.",
+      "",
+      "I can send a quick mockup first so you can judge it before talking about any work.",
+      "",
+      "Should I send the mockup?"
+    ].join("\n");
+  }
+  return [
+    `Subject: Small website fix for ${lead.name}`,
+    "",
+    `Hi ${lead.name} team,`,
+    "",
+    `I opened your website and noticed one practical issue: ${issue}.`,
+    "",
+    "I am not pitching a full redesign. I can send a 1-page screenshot plan showing the issue, the fix, and what I would change first.",
+    "",
+    "If it looks useful, I can implement it as a fixed-price quick sprint.",
+    "",
+    "Should I send the screenshot plan?"
+  ].join("\n");
+}
+
+function ownerSafeIssueTitle(value) {
+  const text = String(value || "").trim();
+  const key = text.toLowerCase();
+  if (!text) return "one small website issue";
+  if (!/[А-Яа-яЁё]/.test(text)) return text;
+  if (key.includes("нет формы")) return "the request form is missing or too hard to find";
+  if (key.includes("нет быстрого контакта")) return "the fastest contact path is hard to find";
+  if (key.includes("мобиль") || key.includes("https")) return "the mobile or security basics need checking";
+  if (key.includes("призыв")) return "the main call-to-action can be clearer";
+  if (key.includes("довер")) return "the page needs stronger trust proof";
+  if (key.includes("локаль")) return "the local search intent can be clearer";
+  if (key.includes("schema")) return "the local business schema is missing";
+  if (key.includes("медлен")) return "the page speed needs a quick check";
+  if (key.includes("сайт уже")) return "the request path can be measured and improved";
+  return "one small website issue";
+}
+
+function ownerEmailForLead(leadInput) {
+  const lead = normalizeLead(leadInput || {});
+  return lead.outreach?.email || lead.pitch || buildLeadPitchFallback(lead);
 }
 
 function buildLeadSteps(leadInput) {
@@ -2068,14 +2223,14 @@ function buildLeadDossier(leadInput) {
     `Best action: ${lead.recommendedAction || "Check contact and send pitch"}`,
     "",
     "Links:",
-    links.website ? `Website: ${links.website}` : "Website: not found",
+    links.website ? `Website: ${links.website}` : lead.websiteReachable === false ? `Website: blocked from direct open (${lead.websiteProblem || `HTTP ${lead.websiteStatus}`})` : "Website: not found",
     links.map ? `Map: ${links.map}` : "",
     `Search: ${links.search}`,
     lead.phone ? `Phone: ${lead.phone}` : "",
     lead.email ? `Email: ${lead.email}` : "",
     "",
-    "Pitch:",
-    lead.pitch || buildLeadPitchFallback(lead),
+    "Owner email:",
+    ownerEmailForLead(lead),
     "",
     "48h follow-up:",
     buildLeadFollowUp(lead),
@@ -2092,9 +2247,13 @@ function buildLeadDossier(leadInput) {
 
 function buildLeadFollowUp(leadInput) {
   const lead = normalizeLead(leadInput || {});
-  const offer = lead.serviceOffer?.name || "small conversion sprint";
-  const issue = lead.opportunity || lead.topPriority || "lead capture gap";
-  return `Quick follow-up on ${lead.name}: I found one practical issue (${issue}) and can fix it as a ${offer} without a full redesign. Want me to send the exact before/after plan?`;
+  if (lead.outreach?.followUp) return lead.outreach.followUp;
+  if (lead.websiteReachable === false) {
+    const status = lead.websiteStatus ? `HTTP ${lead.websiteStatus}` : "did not load";
+    return `Quick follow-up on ${lead.name}: the public website link I found returned ${status}. I can send the screenshot and exact link first, no redesign pitch.`;
+  }
+  const issue = lead.opportunity || lead.topPriority || "one small website issue";
+  return `Quick follow-up on ${lead.name}: I found one small website fix worth checking (${issue}). I can send the screenshot plan first so you can judge it before talking about any work.`;
 }
 
 function moneyText(value) {
