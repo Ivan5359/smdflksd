@@ -68,6 +68,14 @@ a {
   padding: 16px;
 }
 
+#automation,
+#money-machine,
+#radar,
+#deal,
+#export {
+  scroll-margin-top: 92px;
+}
+
 .topbar {
   position: sticky;
   top: 0;
@@ -864,8 +872,11 @@ select:focus {
   border: 1px solid rgba(56, 213, 255, 0.18);
   border-radius: 8px;
   background:
+    linear-gradient(rgba(255, 255, 255, 0.025) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(255, 255, 255, 0.018) 1px, transparent 1px),
     linear-gradient(180deg, rgba(13, 23, 39, 0.96), rgba(5, 10, 19, 0.98)),
     #050a13;
+  background-size: 22px 22px, 22px 22px, auto;
   box-shadow: 0 18px 60px rgba(0, 0, 0, 0.32);
 }
 
@@ -883,6 +894,181 @@ select:focus {
 .money-summary-grid .metric-block strong {
   overflow-wrap: anywhere;
   font-size: 22px;
+}
+
+.lead-workbench {
+  display: grid;
+  gap: 12px;
+  margin-bottom: 12px;
+  padding: 12px;
+  border: 1px solid rgba(56, 213, 255, 0.26);
+  border-radius: 8px;
+  background:
+    linear-gradient(135deg, rgba(47, 125, 255, 0.16), rgba(5, 10, 19, 0.8) 45%),
+    #050a13;
+}
+
+.workbench-main,
+.workbench-grid,
+.contact-matrix,
+.workbench-actions,
+.workbench-plan {
+  display: grid;
+}
+
+.workbench-main {
+  grid-template-columns: minmax(0, 1fr) 92px;
+  gap: 12px;
+  align-items: center;
+}
+
+.workbench-heading {
+  min-width: 0;
+}
+
+.workbench-heading span {
+  color: var(--cyan);
+  font-size: 10px;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.workbench-heading h3 {
+  margin: 4px 0 0;
+  overflow: hidden;
+  color: var(--text);
+  font-size: 22px;
+  line-height: 1.08;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.workbench-heading p,
+.workbench-grid p {
+  margin: 5px 0 0;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.workbench-score {
+  display: grid;
+  place-items: center;
+  min-height: 76px;
+  border: 1px solid rgba(56, 213, 255, 0.46);
+  border-radius: 8px;
+  background: rgba(0, 0, 0, 0.22);
+}
+
+.workbench-score strong {
+  color: var(--cyan);
+  font-size: 30px;
+  line-height: 1;
+}
+
+.workbench-score span {
+  color: var(--soft);
+  font-size: 10px;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.contact-matrix {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 6px;
+}
+
+.contact-matrix span {
+  display: grid;
+  place-items: center;
+  min-height: 28px;
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  font-size: 10px;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.contact-matrix .ready {
+  color: var(--cyan);
+  border-color: rgba(56, 213, 255, 0.38);
+  background: rgba(47, 125, 255, 0.13);
+}
+
+.contact-matrix .missing {
+  color: var(--muted);
+  background: rgba(255, 255, 255, 0.025);
+}
+
+.workbench-grid {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.workbench-grid > div {
+  min-width: 0;
+  min-height: 86px;
+  padding: 10px;
+  border: 1px solid rgba(143, 199, 255, 0.14);
+  border-radius: 7px;
+  background: rgba(5, 10, 19, 0.76);
+}
+
+.workbench-grid b {
+  display: block;
+  color: var(--text);
+  font-size: 12px;
+}
+
+.workbench-actions {
+  grid-template-columns: repeat(9, minmax(0, 1fr));
+  gap: 6px;
+}
+
+.workbench-actions button,
+.workbench-actions a {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 34px;
+  padding: 0 8px;
+  color: var(--soft);
+  text-decoration: none;
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  background: rgba(255, 255, 255, 0.035);
+  font-size: 10px;
+  font-weight: 850;
+  text-transform: uppercase;
+}
+
+.workbench-actions .primary-button {
+  grid-column: span 2;
+  color: #fff;
+  font-size: 11px;
+}
+
+.workbench-actions button:hover:not(:disabled),
+.workbench-actions a:hover {
+  color: var(--text);
+  border-color: rgba(56, 213, 255, 0.58);
+  background: rgba(47, 125, 255, 0.18);
+}
+
+.workbench-plan {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 6px;
+}
+
+.workbench-plan span {
+  min-height: 48px;
+  padding: 8px;
+  color: var(--soft);
+  border: 1px solid rgba(143, 199, 255, 0.14);
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.025);
+  font-size: 11px;
+  line-height: 1.35;
 }
 
 .money-lead-grid {
@@ -910,6 +1096,11 @@ select:focus {
 
 .money-lead-card.warm {
   border-left-color: var(--blue);
+}
+
+.money-lead-card.selected {
+  border-color: rgba(56, 213, 255, 0.62);
+  box-shadow: inset 0 0 0 1px rgba(56, 213, 255, 0.2), 0 18px 40px rgba(0, 0, 0, 0.28);
 }
 
 .money-card-top {
@@ -1041,9 +1232,14 @@ select:focus {
   grid-template-columns: repeat(4, 1fr);
 }
 
-.lead-actions button {
+.lead-actions button,
+.lead-actions a {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   min-height: 28px;
   color: var(--soft);
+  text-decoration: none;
   background: rgba(255, 255, 255, 0.03);
   border: 1px solid var(--line);
   border-radius: 5px;
@@ -1052,9 +1248,17 @@ select:focus {
   text-transform: uppercase;
 }
 
-.lead-actions button:hover {
+.lead-actions button:hover,
+.lead-actions a:hover {
   color: var(--text);
   border-color: rgba(56, 213, 255, 0.55);
+}
+
+.lead-actions button:disabled,
+.workbench-actions button:disabled {
+  color: rgba(142, 163, 195, 0.48);
+  border-color: rgba(25, 48, 79, 0.62);
+  background: rgba(255, 255, 255, 0.018);
 }
 
 .money-actions a {
@@ -1074,6 +1278,10 @@ select:focus {
 .money-actions a:hover {
   color: var(--text);
   border-color: rgba(56, 213, 255, 0.55);
+}
+
+.link-actions {
+  margin-top: -4px;
 }
 
 .money-control {
@@ -1428,6 +1636,10 @@ select:focus {
   .money-summary-grid,
   .money-lead-grid,
   .money-card-meta,
+  .workbench-main,
+  .workbench-grid,
+  .workbench-actions,
+  .workbench-plan,
   .deal-drawer,
   .stream-list article {
     grid-template-columns: 1fr;
@@ -1470,6 +1682,14 @@ select:focus {
   .radar-header h2 {
     font-size: 26px;
   }
+
+  .workbench-actions .primary-button {
+    grid-column: auto;
+  }
+
+  .workbench-heading h3 {
+    white-space: normal;
+  }
 }
 
 @media (max-width: 560px) {
@@ -1477,7 +1697,8 @@ select:focus {
   .toggle-grid.compact,
   .message-tabs,
   .preset-bank,
-  .geo-bank {
+  .geo-bank,
+  .contact-matrix {
     grid-template-columns: 1fr;
   }
 

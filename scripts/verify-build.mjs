@@ -16,7 +16,11 @@ const expectedMarkers = [
   "USA money",
   "Money Machine",
   "Запустить money machine",
-  "Горячие лиды"
+  "Горячие лиды",
+  "Lead Workbench",
+  "Проверить сайт",
+  "TXT pack",
+  "Google поиск"
 ];
 
 const indexHtml = await fs.readFile(indexPath, "utf8");

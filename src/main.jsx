@@ -156,6 +156,7 @@ function App() {
     minScore: 0,
     sort: "money"
   });
+  const [selectedLeadId, setSelectedLeadId] = useState("");
   const [messageTab, setMessageTab] = useState("email");
   const [loading, setLoading] = useState(false);
   const [queueLoading, setQueueLoading] = useState(false);
@@ -170,6 +171,20 @@ function App() {
       .then((response) => response.json())
       .then((payload) => setServerVersion(payload.version || APP_VERSION))
       .catch(() => setServerVersion(APP_VERSION));
+  }, []);
+
+  useEffect(() => {
+    const scrollToHash = () => {
+      const targetId = window.location.hash.replace("#", "");
+      if (!targetId) return;
+      window.setTimeout(() => {
+        document.getElementById(decodeURIComponent(targetId))?.scrollIntoView({ block: "start" });
+      }, 80);
+    };
+
+    scrollToHash();
+    window.addEventListener("hashchange", scrollToHash);
+    return () => window.removeEventListener("hashchange", scrollToHash);
   }, []);
 
   const queueUrls = useMemo(
@@ -235,9 +250,20 @@ function App() {
     ];
   }, [crm.length, rankedDiscovery, savedLeads]);
 
-  const moneyLeads = moneyMachine.leads || [];
+  const moneyLeads = useMemo(() => (moneyMachine.leads || []).map(normalizeLead), [moneyMachine]);
   const moneyPipeline = moneyMachine.pipeline || {};
   const hotMoneyLeads = moneyLeads.filter((lead) => lead.priority === "hot").length;
+  const selectedMoneyLead = useMemo(
+    () => moneyLeads.find((lead) => lead.id === selectedLeadId) || moneyLeads[0] || null,
+    [moneyLeads, selectedLeadId]
+  );
+  const selectedLeadLinks = selectedMoneyLead ? getLeadLinks(selectedMoneyLead) : {};
+  const expectedPipelineRevenue = Math.round(
+    ((Number(moneyPipeline.oneTimeValue || 0) + Number(moneyPipeline.monthlyValue || 0) * 3) *
+      Number(moneySettings.closeRate || 0)) /
+      100
+  );
+  const outreachPackCount = moneyLeads.length ? moneyLeads.length : filteredDiscovery.length;
 
   function updateForm(key, value) {
     setForm((current) => ({ ...current, [key]: value }));
@@ -403,6 +429,8 @@ function App() {
       setMoneyMachine(data);
       writeLocal("sitemoney.moneyMachine", data);
       setDiscoveredBusinesses(data.leads || []);
+      const normalizedLeads = (data.leads || []).map(normalizeLead);
+      if (normalizedLeads.length) setSelectedLeadId(normalizedLeads[0].id);
 
       const reportItems = (data.reports || []).map((item) => ({ ok: true, report: item }));
       setBulkResults(reportItems);
@@ -505,53 +533,117 @@ function App() {
     window.setTimeout(() => setCopied(""), 1400);
   }
 
+  function selectLead(lead) {
+    const normalized = normalizeLead(lead);
+    setSelectedLeadId(normalized.id);
+  }
+
+  function openLeadAction(lead, target = "best") {
+    const links = getLeadLinks(lead);
+    const url = links[target] || links.best;
+    if (!url) {
+      setError("У этого лида нет рабочей ссылки. Используй Google поиск или скопируй бриф для ручной проверки.");
+      return;
+    }
+    window.open(url, "_blank", "noopener,noreferrer");
+  }
+
+  async function auditLeadWebsite(lead) {
+    const normalized = normalizeLead(lead);
+    const links = getLeadLinks(normalized);
+    selectLead(normalized);
+    if (!links.website) {
+      setError("У лида нет сайта. Открой карту или Google поиск, найди сайт/телефон и сохрани контакт вручную.");
+      return;
+    }
+    await runAudit(null, {
+      url: links.website,
+      niche: normalized.niche || form.niche,
+      city: normalized.city || form.city,
+      averageSale: form.averageSale,
+      monthlyVisitors: form.monthlyVisitors,
+      mode: "agent",
+      autopilot: true,
+      createCrmTasks: true
+    });
+  }
+
+  async function copyLeadDossier(lead) {
+    await copyText(`dossier-${normalizeLead(lead).id}`, buildLeadDossier(lead));
+  }
+
+  function downloadOutreachPack() {
+    const source = moneyLeads.length ? moneyLeads : filteredDiscovery.map(normalizeLead);
+    if (!source.length) return;
+    const body = source
+      .slice(0, 25)
+      .map((lead, index) => buildLeadDossier({ ...lead, rank: lead.rank || index + 1 }))
+      .join("\n\n---\n\n");
+    downloadBlob(new Blob([body], { type: "text/plain;charset=utf-8" }), "sitemoney-outreach-pack.txt");
+    setCopied("outreach-pack");
+    window.setTimeout(() => setCopied(""), 1400);
+  }
+
   function downloadLeadsCsv() {
     const source = filteredDiscovery.length ? filteredDiscovery : savedLeads;
     const rows = [
-      ["name", "city", "country", "website", "phone", "email", "score", "money_score", "priority", "offer", "deal_value", "money_opportunity", "top_priority", "pitch", "map"],
-      ...source.map((lead) => [
-        lead.name,
-        lead.city,
-        lead.country,
-        lead.website,
-        lead.phone,
-        lead.email,
-        lead.score,
-        lead.moneyScore,
-        lead.priority,
-        lead.serviceOffer?.name,
-        lead.estimatedDealValue,
-        lead.moneyOpportunity,
-        lead.topPriority,
-        lead.pitch,
-        lead.osmUrl || lead.mapUrl
-      ])
+      ["name", "city", "country", "website", "phone", "email", "score", "money_score", "priority", "offer", "deal_value", "money_opportunity", "top_priority", "pitch", "map", "best_url", "search_url", "next_steps"],
+      ...source.map((lead) => {
+        const normalized = normalizeLead(lead);
+        const links = getLeadLinks(normalized);
+        return [
+          normalized.name,
+          normalized.city,
+          normalized.country,
+          normalized.website,
+          normalized.phone,
+          normalized.email,
+          normalized.score,
+          normalized.moneyScore,
+          normalized.priority,
+          normalized.serviceOffer?.name,
+          normalized.estimatedDealValue,
+          normalized.moneyOpportunity,
+          normalized.topPriority,
+          normalized.pitch,
+          normalized.osmUrl || normalized.mapUrl,
+          links.best,
+          links.search,
+          (normalized.nextSteps || []).join(" | ")
+        ];
+      })
     ];
     downloadBlob(new Blob([toCsv(rows)], { type: "text/csv;charset=utf-8" }), "sitemoney-leads.csv");
   }
 
   function downloadMoneyCsv() {
     const rows = [
-      ["rank", "name", "city", "country", "contact_route", "website", "phone", "email", "money_score", "priority", "opportunity", "offer", "price", "monthly", "client_opportunity", "recommended_action", "pitch"],
-      ...moneyLeads.map((lead) => [
-        lead.rank,
-        lead.name,
-        lead.city,
-        lead.country,
-        lead.contactRoute,
-        lead.website,
-        lead.phone,
-        lead.email,
-        lead.moneyScore,
-        lead.priority,
-        lead.opportunity,
-        lead.serviceOffer?.name,
-        lead.serviceOffer?.price,
-        lead.serviceOffer?.monthly,
-        lead.clientOpportunity,
-        lead.recommendedAction,
-        lead.pitch
-      ])
+      ["rank", "name", "city", "country", "contact_route", "website", "phone", "email", "money_score", "priority", "opportunity", "offer", "price", "monthly", "client_opportunity", "recommended_action", "best_url", "search_url", "pitch", "next_steps"],
+      ...moneyLeads.map((lead) => {
+        const links = getLeadLinks(lead);
+        return [
+          lead.rank,
+          lead.name,
+          lead.city,
+          lead.country,
+          lead.contactRoute,
+          lead.website,
+          lead.phone,
+          lead.email,
+          lead.moneyScore,
+          lead.priority,
+          lead.opportunity,
+          lead.serviceOffer?.name,
+          lead.serviceOffer?.price,
+          lead.serviceOffer?.monthly,
+          lead.clientOpportunity,
+          lead.recommendedAction,
+          links.best,
+          links.search,
+          lead.pitch,
+          (lead.nextSteps || []).join(" | ")
+        ];
+      })
     ];
     downloadBlob(new Blob([toCsv(rows)], { type: "text/csv;charset=utf-8" }), "sitemoney-money-machine.csv");
   }
@@ -601,9 +693,13 @@ function App() {
   }
 
   async function copyText(label, value) {
-    await navigator.clipboard.writeText(value);
-    setCopied(label);
-    window.setTimeout(() => setCopied(""), 1400);
+    try {
+      await navigator.clipboard.writeText(value);
+      setCopied(label);
+      window.setTimeout(() => setCopied(""), 1400);
+    } catch {
+      setError("Браузер не дал доступ к clipboard. Используй экспорт TXT/CSV или выдели текст вручную.");
+    }
   }
 
   function downloadJson() {
@@ -1046,6 +1142,10 @@ function App() {
                   <Download size={15} />
                   CSV money
                 </button>
+                <button className="secondary-button" onClick={downloadOutreachPack} disabled={!outreachPackCount}>
+                  <Clipboard size={15} />
+                  TXT pack
+                </button>
               </div>
             </div>
 
@@ -1070,52 +1170,131 @@ function App() {
               />
               <MetricBlock
                 icon={<Zap size={18} />}
-                label="Next best action"
-                value={moneyPipeline.topOffer || "Пусто"}
-                note={moneyPipeline.nextBestAction || "Запусти поиск"}
+                label="Ожидаемый доход"
+                value={money(expectedPipelineRevenue)}
+                note={`${moneySettings.closeRate}% close rate`}
               />
             </div>
 
+            {selectedMoneyLead ? (
+              <section className="lead-workbench" aria-label="Lead Workbench">
+                <div className="workbench-main">
+                  <div className="workbench-heading">
+                    <span>Lead Workbench</span>
+                    <h3>{selectedMoneyLead.name}</h3>
+                    <p>{[selectedMoneyLead.city, selectedMoneyLead.country].filter(Boolean).join(", ") || selectedMoneyLead.niche}</p>
+                  </div>
+                  <div className="workbench-score">
+                    <strong>{selectedMoneyLead.moneyScore || selectedMoneyLead.score || 0}</strong>
+                    <span>{selectedMoneyLead.priority || "lead"}</span>
+                  </div>
+                </div>
+
+                <div className="contact-matrix">
+                  <span className={selectedLeadLinks.website ? "ready" : "missing"}>Сайт</span>
+                  <span className={selectedMoneyLead.phone ? "ready" : "missing"}>Телефон</span>
+                  <span className={selectedMoneyLead.email ? "ready" : "missing"}>Email</span>
+                  <span className={selectedLeadLinks.map || selectedLeadLinks.osm ? "ready" : "missing"}>Карта</span>
+                </div>
+
+                <div className="workbench-grid">
+                  <div>
+                    <b>Лучшее действие</b>
+                    <p>{selectedMoneyLead.recommendedAction || moneyPipeline.nextBestAction || "Скопировать питч и проверить контакт"}</p>
+                  </div>
+                  <div>
+                    <b>Оффер</b>
+                    <p>
+                      {selectedMoneyLead.serviceOffer?.name || "Conversion Sprint"} · {money(selectedMoneyLead.estimatedDealValue || 0)}
+                    </p>
+                  </div>
+                  <div>
+                    <b>Почему можно продать</b>
+                    <p>{selectedMoneyLead.opportunity || selectedMoneyLead.topPriority || "Есть слабое место в пути к заявке"}</p>
+                  </div>
+                </div>
+
+                <div className="workbench-actions">
+                  <button className="primary-button" type="button" onClick={() => auditLeadWebsite(selectedMoneyLead)} disabled={!selectedLeadLinks.website || loading}>
+                    <Search size={15} />
+                    Проверить сайт
+                  </button>
+                  <ActionLink href={selectedLeadLinks.website}>Сайт</ActionLink>
+                  <ActionLink href={selectedLeadLinks.map || selectedLeadLinks.osm}>Карта</ActionLink>
+                  <ActionLink href={selectedLeadLinks.search}>Google поиск</ActionLink>
+                  <ActionLink href={selectedLeadLinks.email}>Email</ActionLink>
+                  <ActionLink href={selectedLeadLinks.phone}>Телефон</ActionLink>
+                  <button type="button" onClick={() => copyLeadBrief(selectedMoneyLead)}>
+                    Питч
+                  </button>
+                  <button type="button" onClick={() => copyLeadDossier(selectedMoneyLead)}>
+                    Бриф
+                  </button>
+                  <button type="button" onClick={() => addBusinessToCrm(selectedMoneyLead)}>
+                    CRM
+                  </button>
+                </div>
+
+                <div className="workbench-plan">
+                  {(selectedMoneyLead.nextSteps?.length ? selectedMoneyLead.nextSteps : buildLeadSteps(selectedMoneyLead)).slice(0, 4).map((step, index) => (
+                    <span key={`${selectedMoneyLead.id}-step-${index}`}>{step}</span>
+                  ))}
+                </div>
+              </section>
+            ) : null}
+
             <div className="money-lead-grid">
-              {moneyLeads.slice(0, 8).map((lead) => (
-                <article key={lead.id} className={`money-lead-card ${lead.priority || ""}`}>
-                  <div className="money-card-top">
-                    <div className="money-score">
-                      <strong>{lead.moneyScore || 0}</strong>
-                      <span>{lead.priority || "lead"}</span>
+              {moneyLeads.slice(0, 8).map((lead) => {
+                const links = getLeadLinks(lead);
+                const isSelected = selectedMoneyLead?.id === lead.id;
+                return (
+                  <article key={lead.id} className={`money-lead-card ${lead.priority || ""} ${isSelected ? "selected" : ""}`}>
+                    <div className="money-card-top">
+                      <div className="money-score">
+                        <strong>{lead.moneyScore || 0}</strong>
+                        <span>{lead.priority || "lead"}</span>
+                      </div>
+                      <div>
+                        <h3>{lead.name}</h3>
+                        <p>{[lead.city, lead.country].filter(Boolean).join(", ") || lead.contactRoute}</p>
+                      </div>
                     </div>
-                    <div>
-                      <h3>{lead.name}</h3>
-                      <p>{[lead.city, lead.country].filter(Boolean).join(", ") || lead.contactRoute}</p>
+                    <div className="money-card-meta">
+                      <span>{lead.opportunity}</span>
+                      <b>{lead.serviceOffer?.name || "Offer"}</b>
+                      <strong>{money(lead.estimatedDealValue || 0)}</strong>
                     </div>
-                  </div>
-                  <div className="money-card-meta">
-                    <span>{lead.opportunity}</span>
-                    <b>{lead.serviceOffer?.name || "Offer"}</b>
-                    <strong>{money(lead.estimatedDealValue || 0)}</strong>
-                  </div>
-                  <p className="pitch-preview">{lead.pitch}</p>
-                  <div className="money-evidence">
-                    {(lead.evidence || []).slice(0, 3).map((item) => (
-                      <span key={item}>{item}</span>
-                    ))}
-                  </div>
-                  <div className="lead-actions money-actions">
-                    <button type="button" onClick={() => saveBusinessLead(lead)}>
-                      {savedLeadIds.has(lead.id) ? "✓" : "Сохр"}
-                    </button>
-                    <button type="button" onClick={() => addBusinessToCrm(lead)}>
-                      CRM
-                    </button>
-                    <button type="button" onClick={() => copyLeadBrief(lead)}>
-                      Питч
-                    </button>
-                    <a href={lead.website || lead.osmUrl || lead.mapUrl} target="_blank" rel="noreferrer">
-                      Открыть
-                    </a>
-                  </div>
-                </article>
-              ))}
+                    <p className="pitch-preview">{lead.pitch}</p>
+                    <div className="money-evidence">
+                      {(lead.evidence || []).slice(0, 3).map((item) => (
+                        <span key={item}>{item}</span>
+                      ))}
+                    </div>
+                    <div className="lead-actions money-actions">
+                      <button type="button" onClick={() => selectLead(lead)}>
+                        {isSelected ? "Выбран" : "План"}
+                      </button>
+                      <button type="button" onClick={() => auditLeadWebsite(lead)} disabled={!links.website || loading}>
+                        Аудит
+                      </button>
+                      <button type="button" onClick={() => copyLeadBrief(lead)}>
+                        Питч
+                      </button>
+                      <button type="button" onClick={() => addBusinessToCrm(lead)}>
+                        CRM
+                      </button>
+                    </div>
+                    <div className="lead-actions money-actions link-actions">
+                      <ActionLink href={links.website}>Сайт</ActionLink>
+                      <ActionLink href={links.map || links.osm}>Карта</ActionLink>
+                      <ActionLink href={links.search}>Поиск</ActionLink>
+                      <button type="button" onClick={() => saveBusinessLead(lead)}>
+                        {savedLeadIds.has(lead.id) ? "✓" : "Сохр"}
+                      </button>
+                    </div>
+                  </article>
+                );
+              })}
               {!moneyLeads.length ? (
                 <p className="empty-state">Money Machine еще не запускалась. Выбери нишу, гео и нажми запуск.</p>
               ) : null}
@@ -1419,6 +1598,21 @@ function Toggle({ label, checked, onChange }) {
   );
 }
 
+function ActionLink({ href, children }) {
+  if (!href) {
+    return (
+      <button type="button" disabled>
+        {children}
+      </button>
+    );
+  }
+  return (
+    <a href={href} target="_blank" rel="noreferrer">
+      {children}
+    </a>
+  );
+}
+
 function ScoreDial({ score }) {
   return (
     <div className="score-dial" style={{ "--score": `${score * 3.6}deg` }}>
@@ -1517,6 +1711,7 @@ function normalizeLead(lead) {
     name: lead.name || "Unknown business",
     city: lead.city || "",
     country: lead.country || "",
+    address: lead.address || "",
     website: lead.website || "",
     phone: lead.phone || "",
     email: lead.email || "",
@@ -1532,10 +1727,14 @@ function normalizeLead(lead) {
     estimatedDealValue: Number(lead.estimatedDealValue || 0),
     recurringValue: Number(lead.recurringValue || 0),
     serviceOffer: lead.serviceOffer || null,
+    issue: lead.issue || null,
     recommendedAction: lead.recommendedAction || "",
     pitch: lead.pitch || "",
     evidence: lead.evidence || [],
+    nextSteps: lead.nextSteps || [],
     topPriority: lead.topPriority || lead.suggestedAction || "Ждет аудита",
+    source: lead.source || "",
+    tags: lead.tags || {},
     savedAt: lead.savedAt || new Date().toISOString()
   };
 }
@@ -1575,10 +1774,126 @@ function money(value) {
 
 function safeHost(value) {
   try {
-    return new URL(value).hostname;
+    return new URL(safeExternalUrl(value) || value).hostname;
   } catch {
     return String(value || "site");
   }
+}
+
+function safeExternalUrl(value) {
+  const raw = String(value || "").trim();
+  if (!raw) return "";
+  try {
+    const firstCandidate = raw.split(/[;|\s]+/).find(Boolean) || "";
+    if (!firstCandidate || /^mailto:|^tel:/i.test(firstCandidate)) return "";
+    const withProtocol = /^https?:\/\//i.test(firstCandidate) ? firstCandidate : `https://${firstCandidate}`;
+    const url = new URL(withProtocol);
+    if (!["http:", "https:"].includes(url.protocol)) return "";
+    return url.toString();
+  } catch {
+    return "";
+  }
+}
+
+function getLeadLinks(leadInput) {
+  const lead = normalizeLead(leadInput || {});
+  const website = safeExternalUrl(lead.website);
+  const osm = safeExternalUrl(lead.osmUrl);
+  const map = safeExternalUrl(lead.mapUrl);
+  const search = buildLeadSearchUrl(lead);
+  const email = lead.email
+    ? `mailto:${lead.email}?subject=${encodeURIComponent(`Quick fix for ${lead.name}`)}&body=${encodeURIComponent(lead.pitch || buildLeadPitchFallback(lead))}`
+    : "";
+  const phoneDigits = String(lead.phone || "").replace(/[^\d+]/g, "");
+  const phone = phoneDigits.length >= 7 ? `tel:${phoneDigits}` : "";
+  return {
+    website,
+    osm,
+    map: map || osm,
+    search,
+    email,
+    phone,
+    best: website || map || osm || search
+  };
+}
+
+function buildLeadSearchUrl(leadInput) {
+  const lead = normalizeLead(leadInput || {});
+  const query = [lead.name, lead.city, lead.country, lead.niche, "website", "contact"]
+    .filter(Boolean)
+    .join(" ");
+  return `https://www.google.com/search?q=${encodeURIComponent(query)}`;
+}
+
+function buildLeadPitchFallback(leadInput) {
+  const lead = normalizeLead(leadInput || {});
+  const location = [lead.city, lead.country].filter(Boolean).join(", ");
+  const offer = lead.serviceOffer?.name || "Conversion Sprint";
+  const price = lead.serviceOffer?.price || lead.estimatedDealValue || 390;
+  const issue = lead.opportunity || lead.topPriority || "lead capture gap";
+  return `Hi ${lead.name}, I found your ${lead.niche || "local service"} business${location ? ` in ${location}` : ""}. The fastest revenue leak I see is: ${issue}. I can package a small ${offer} for about $${price}. Want me to send the exact 3 fixes?`;
+}
+
+function buildLeadSteps(leadInput) {
+  const lead = normalizeLead(leadInput || {});
+  return [
+    lead.website ? "Проверить сайт через аудит внутри SiteMoney" : "Открыть карту или Google и найти сайт/телефон",
+    "Скопировать питч и отправить владельцу вручную",
+    "Добавить лид в CRM со статусом Новый",
+    "Через 48 часов отправить follow-up"
+  ];
+}
+
+function buildLeadDossier(leadInput) {
+  const lead = normalizeLead(leadInput || {});
+  const links = getLeadLinks(lead);
+  const steps = (lead.nextSteps?.length ? lead.nextSteps : buildLeadSteps(lead)).map((step, index) => `${index + 1}. ${step}`);
+  const evidence = (lead.evidence || []).slice(0, 6).map((item) => `- ${item}`);
+  return [
+    `#${lead.rank || ""} ${lead.name}`.trim(),
+    [lead.city, lead.country].filter(Boolean).join(", "),
+    lead.address ? `Address: ${lead.address}` : "",
+    `Priority: ${lead.priority || "lead"} | Money score: ${lead.moneyScore || lead.score || 0}`,
+    `Offer: ${lead.serviceOffer?.name || "Conversion Sprint"} (${moneyText(lead.estimatedDealValue || lead.serviceOffer?.price || 0)})`,
+    `Problem: ${lead.opportunity || lead.topPriority || "Lead capture gap"}`,
+    `Best action: ${lead.recommendedAction || "Check contact and send pitch"}`,
+    "",
+    "Links:",
+    links.website ? `Website: ${links.website}` : "Website: not found",
+    links.map ? `Map: ${links.map}` : "",
+    `Search: ${links.search}`,
+    lead.phone ? `Phone: ${lead.phone}` : "",
+    lead.email ? `Email: ${lead.email}` : "",
+    "",
+    "Pitch:",
+    lead.pitch || buildLeadPitchFallback(lead),
+    "",
+    "48h follow-up:",
+    buildLeadFollowUp(lead),
+    "",
+    "Evidence:",
+    evidence.length ? evidence.join("\n") : "- Needs manual contact check",
+    "",
+    "Steps:",
+    steps.join("\n")
+  ]
+    .filter((line) => line !== "")
+    .join("\n");
+}
+
+function buildLeadFollowUp(leadInput) {
+  const lead = normalizeLead(leadInput || {});
+  const offer = lead.serviceOffer?.name || "small conversion sprint";
+  const issue = lead.opportunity || lead.topPriority || "lead capture gap";
+  return `Quick follow-up on ${lead.name}: I found one practical issue (${issue}) and can fix it as a ${offer} without a full redesign. Want me to send the exact before/after plan?`;
+}
+
+function moneyText(value) {
+  return new Intl.NumberFormat("en-US", {
+    style: "currency",
+    currency: "USD",
+    maximumFractionDigits: 0
+  }).format(Number(value || 0));
 }
 
 function downloadBlob(blob, filename) {

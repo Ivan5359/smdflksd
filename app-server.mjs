@@ -289,7 +289,11 @@ async function inspectFrontendBuild() {
     geoPreset: "USA money",
     moneyMachine: "Money Machine",
     runMoneyMachine: "Запустить money machine",
-    hotLeads: "Горячие лиды"
+    hotLeads: "Горячие лиды",
+    leadWorkbench: "Lead Workbench",
+    safeAuditAction: "Проверить сайт",
+    outreachPack: "TXT pack",
+    googleSearch: "Google поиск"
   };
 
   try {
@@ -1019,11 +1023,16 @@ function nicheToOverpassFilters(niche) {
 function normalizeBusinessWebsite(value) {
   const raw = String(value || "").trim();
   if (!raw) return "";
+  const candidates = raw
+    .split(/[;|\s]+/)
+    .map((item) => item.trim())
+    .filter(Boolean)
+    .filter((item) => !/^mailto:|^tel:/i.test(item));
   try {
-    return normalizeUrl(raw);
+    return normalizeUrl(candidates[0] || raw);
   } catch {
     try {
-      return normalizeUrl(raw.split(/\s+/)[0]);
+      return normalizeUrl(candidates.find((item) => /\./.test(item)) || "");
     } catch {
       return "";
     }
