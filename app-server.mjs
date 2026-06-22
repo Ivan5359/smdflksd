@@ -33,6 +33,11 @@ app.get("/__version", (_request, response) => {
   });
 });
 
+app.get("/__frontend-check", async (_request, response) => {
+  const check = await inspectFrontendBuild();
+  response.status(check.ok ? 200 : 500).json(check);
+});
+
 app.get("/api/templates", (_request, response) => {
   response.json({
     niches: ["plumber", "dentist", "roofing", "salon", "law firm", "restaurant", "fitness studio"],
@@ -143,11 +148,20 @@ app.get("/api/reports", async (_request, response) => {
   response.json(await readReports());
 });
 
-app.use(express.static(DIST_DIR));
+app.use(
+  express.static(DIST_DIR, {
+    setHeaders(response, filePath) {
+      if (filePath.endsWith("index.html")) {
+        response.setHeader("Cache-Control", "no-store");
+      }
+    }
+  })
+);
 app.use(express.static(path.join(__dirname, "public")));
 app.get(/.*/, async (_request, response, next) => {
   try {
     await fs.access(path.join(DIST_DIR, "index.html"));
+    response.setHeader("Cache-Control", "no-store");
     response.sendFile(path.join(DIST_DIR, "index.html"));
   } catch {
     next();
@@ -192,6 +206,44 @@ async function auditSingle(input) {
     return buildReport({ ...input, url: normalizedUrl }, facts);
   } finally {
     clearTimeout(timeout);
+  }
+}
+
+async function inspectFrontendBuild() {
+  const markers = {
+    version: APP_VERSION,
+    globalSearch: "Глобальный поиск",
+    findBusinesses: "Найти бизнесы",
+    discoveryList: "Найденные бизнесы автопилотом"
+  };
+
+  try {
+    const indexHtml = await fs.readFile(path.join(DIST_DIR, "index.html"), "utf8");
+    const assets = Array.from(indexHtml.matchAll(/(?:src|href)="([^"]+\.(?:js|css))"/g))
+      .map((match) => match[1])
+      .filter((assetPath) => assetPath.startsWith("/assets/"));
+    let bundleText = indexHtml;
+    for (const assetPath of assets) {
+      const filePath = path.join(DIST_DIR, assetPath.replace(/^\//, ""));
+      bundleText += "\n" + (await fs.readFile(filePath, "utf8"));
+    }
+
+    const checks = Object.fromEntries(
+      Object.entries(markers).map(([key, marker]) => [key, bundleText.includes(marker)])
+    );
+
+    return {
+      ok: Object.values(checks).every(Boolean),
+      version: APP_VERSION,
+      checks,
+      assets
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      version: APP_VERSION,
+      error: error.message || "Frontend build check failed"
+    };
   }
 }
 

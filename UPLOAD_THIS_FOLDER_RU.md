@@ -4,12 +4,14 @@
 
 Что внутри:
 
-- сайт-аудитор SiteMoney Audit;
+- новый радикальный черно-бело-синий command-center дизайн;
+- центральный `Радар целей`;
 - глобальный автопоиск бизнесов через OpenStreetMap/Overpass;
 - автоаудит найденных сайтов;
 - сортировка целей по приоритету и потенциальным деньгам;
 - готовые email, follow-up, DM и Telegram-сообщения;
-- CRM-задачи, история и экспорт HTML/JSON/CSV.
+- CRM-задачи, история и экспорт HTML/JSON/CSV;
+- build-check, который не даст Railway задеплоить старый frontend без `Глобальный поиск`.
 
 Обязательные файлы и папки:
 
@@ -36,10 +38,6 @@
 - `dist/`
 - `server.out.log`
 - `server.err.log`
-- `ui-test.out.log`
-- `ui-test.err.log`
-- `discovery-test.out.log`
-- `discovery-test.err.log`
 - `design/`
 - `data/`
 - `RAILWAY_UPLOAD_READY.zip`
@@ -49,8 +47,9 @@ Railway:
 - Root Directory: пусто, если эта папка является корнем репозитория.
 - Если ты загрузил папку как подпапку в репозитории, Root Directory должен быть `RAILWAY_UPLOAD_READY`.
 - Start Command: `node app-server.mjs`.
-- Проверка после деплоя: открыть `/__version` и увидеть `SITEMONEY_AUDIT_20260619_GLOBAL_DISCOVERY`.
+- Проверка backend после деплоя: открыть `/__version` и увидеть `SITEMONEY_AUDIT_20260619_GLOBAL_DISCOVERY`.
+- Проверка frontend после деплоя: открыть `/__frontend-check`; все `checks` должны быть `true`.
+
+Если `/__version` новый, а сайт визуально старый, значит frontend не пересобрался или Railway смотрит не на ту папку. Тогда проверь `Root Directory` и redeploy последней версии.
 
 Важно: этот пакет не использует `lucide-react`, чтобы Railway не мог снова упасть на `createLucideIcon.js`.
-
-Автоматизация сама ищет бизнесы и готовит лиды. Финальную отправку сообщений владельцам лучше делать вручную, чтобы не ловить блокировки аккаунтов и не нарушать правила площадок.

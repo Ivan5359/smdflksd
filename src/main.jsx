@@ -346,9 +346,35 @@ function App() {
 
   const activeMessage = report.outreach[messageTab] || report.outreach.email;
   const topPriority = report.priorities[0];
+  const radarTargets = rankedDiscovery.length
+    ? rankedDiscovery.slice(0, 6)
+    : sortedBulk.slice(0, 6).map((item) => ({
+        id: item.id,
+        name: item.businessName || item.host,
+        city: item.input?.city || form.city,
+        country: "",
+        website: item.finalUrl || item.input.url,
+        osmUrl: item.finalUrl || item.input.url,
+        score: item.score.total,
+        moneyOpportunity: item.money.monthlyOpportunity,
+        topPriority: item.priorities?.[0]?.title || "Готов к продаже"
+      }));
+  const radarFeed = radarTargets.length ? radarTargets : [
+    {
+      id: "demo-radar",
+      name: report.businessName || report.host,
+      city: form.city,
+      country: "",
+      website: report.finalUrl || report.input.url,
+      osmUrl: report.finalUrl || report.input.url,
+      score: report.score.total,
+      moneyOpportunity: report.money.monthlyOpportunity,
+      topPriority: topPriority?.title || "Ждет поиска"
+    }
+  ];
 
   return (
-    <div className="app-shell">
+    <div className="app-shell command-center">
       <header className="topbar">
         <div className="brand">
           <div className="brand-mark" aria-hidden="true">
@@ -360,9 +386,9 @@ function App() {
           </div>
         </div>
         <nav className="command-tabs" aria-label="Рабочие зоны">
-          <a href="#audit">Аудит</a>
           <a href="#automation">Автопилот</a>
-          <a href="#crm">CRM</a>
+          <a href="#radar">Радар целей</a>
+          <a href="#deal">Сделка</a>
           <a href="#export">Экспорт</a>
         </nav>
         <div className="topbar-actions">
@@ -370,107 +396,109 @@ function App() {
             <Sparkles size={16} />
             Демо
           </button>
-          <button className="primary-button" onClick={(event) => runAudit(event)} disabled={loading}>
-            {loading ? <Loader2 className="spin" size={16} /> : <Play size={16} />}
-            Запустить
+          <button className="primary-button" onClick={runDiscovery} disabled={discoverLoading}>
+            {discoverLoading ? <Loader2 className="spin" size={16} /> : <Radar size={16} />}
+            Найти бизнесы
           </button>
         </div>
       </header>
 
-      <main className="workspace">
-        <aside className="automation-rail" id="automation">
-          <SectionTitle icon={<Bot size={18} />} title="Автопилот" />
+      <main className="mission-grid">
+        <aside className="launch-column" id="automation">
+          <section className="control-slab">
+            <div className="slab-kicker">01 / CONTROL</div>
+            <SectionTitle icon={<Bot size={18} />} title="Автопилот" />
+            <form className="audit-form" onSubmit={(event) => runAudit(event)}>
+              <label>
+                URL для фокуса
+                <div className="input-with-action">
+                  <input
+                    type="url"
+                    placeholder="https://business.com"
+                    value={form.url}
+                    onChange={(event) => updateForm("url", event.target.value)}
+                  />
+                  <button type="button" onClick={addCurrentToQueue} aria-label="Добавить URL в очередь">
+                    <Plus size={16} />
+                  </button>
+                </div>
+              </label>
 
-          <form className="audit-form" onSubmit={(event) => runAudit(event)}>
-            <label>
-              URL для фокуса
-              <div className="input-with-action">
-                <input
-                  type="url"
-                  placeholder="https://business.com"
-                  value={form.url}
-                  onChange={(event) => updateForm("url", event.target.value)}
-                />
-                <button type="button" onClick={addCurrentToQueue} aria-label="Добавить URL в очередь">
-                  <Plus size={16} />
-                </button>
+              <div className="split-fields">
+                <label>
+                  Ниша
+                  <input value={form.niche} onChange={(event) => updateForm("niche", event.target.value)} />
+                </label>
+                <label>
+                  Город
+                  <input value={form.city} onChange={(event) => updateForm("city", event.target.value)} />
+                </label>
               </div>
-            </label>
 
-            <div className="split-fields">
-              <label>
-                Ниша
-                <input value={form.niche} onChange={(event) => updateForm("niche", event.target.value)} />
-              </label>
-              <label>
-                Город
-                <input value={form.city} onChange={(event) => updateForm("city", event.target.value)} />
-              </label>
-            </div>
+              <div className="split-fields">
+                <label>
+                  Средний чек
+                  <input
+                    type="number"
+                    min="1"
+                    value={form.averageSale}
+                    onChange={(event) => updateForm("averageSale", event.target.value)}
+                  />
+                </label>
+                <label>
+                  Визиты/мес
+                  <input
+                    type="number"
+                    min="1"
+                    value={form.monthlyVisitors}
+                    onChange={(event) => updateForm("monthlyVisitors", event.target.value)}
+                  />
+                </label>
+              </div>
 
-            <div className="split-fields">
-              <label>
-                Средний чек
-                <input
-                  type="number"
-                  min="1"
-                  value={form.averageSale}
-                  onChange={(event) => updateForm("averageSale", event.target.value)}
+              <div className="segmented">
+                {["fast", "deep", "agent"].map((mode) => (
+                  <button
+                    type="button"
+                    key={mode}
+                    className={form.mode === mode ? "active" : ""}
+                    onClick={() => updateForm("mode", mode)}
+                  >
+                    {mode === "fast" ? "Быстро" : mode === "deep" ? "Глубоко" : "Агент"}
+                  </button>
+                ))}
+              </div>
+
+              <div className="toggle-grid">
+                <Toggle
+                  label="CRM задачи"
+                  checked={form.createCrmTasks}
+                  onChange={(value) => updateForm("createCrmTasks", value)}
                 />
-              </label>
-              <label>
-                Визиты/мес
-                <input
-                  type="number"
-                  min="1"
-                  value={form.monthlyVisitors}
-                  onChange={(event) => updateForm("monthlyVisitors", event.target.value)}
+                <Toggle
+                  label="Автоэкспорт"
+                  checked={form.autoExport}
+                  onChange={(value) => updateForm("autoExport", value)}
                 />
-              </label>
-            </div>
+                <Toggle
+                  label="Автопилот"
+                  checked={form.autopilot}
+                  onChange={(value) => updateForm("autopilot", value)}
+                />
+              </div>
 
-            <div className="segmented">
-              {["fast", "deep", "agent"].map((mode) => (
-                <button
-                  type="button"
-                  key={mode}
-                  className={form.mode === mode ? "active" : ""}
-                  onClick={() => updateForm("mode", mode)}
-                >
-                  {mode === "fast" ? "Быстро" : mode === "deep" ? "Глубоко" : "Агент"}
-                </button>
-              ))}
-            </div>
+              <button className="primary-button wide" type="submit" disabled={loading}>
+                {loading ? <Loader2 className="spin" size={17} /> : <Search size={17} />}
+                Аудит URL
+              </button>
+            </form>
+          </section>
 
-            <div className="toggle-grid">
-              <Toggle
-                label="CRM задачи"
-                checked={form.createCrmTasks}
-                onChange={(value) => updateForm("createCrmTasks", value)}
-              />
-              <Toggle
-                label="Автоэкспорт"
-                checked={form.autoExport}
-                onChange={(value) => updateForm("autoExport", value)}
-              />
-              <Toggle
-                label="Автопилот"
-                checked={form.autopilot}
-                onChange={(value) => updateForm("autopilot", value)}
-              />
-            </div>
-
-            <button className="primary-button wide" type="submit" disabled={loading}>
-              {loading ? <Loader2 className="spin" size={17} /> : <Search size={17} />}
-              Аудит URL
-            </button>
-          </form>
-
-          <div className="queue-panel">
+          <section className="control-slab discovery-slab">
             <div className="panel-head">
               <div>
                 <span>Глобальный поиск</span>
-                <strong>{discoverySettings.worldwide ? "World" : "Custom"}</strong>
+                <strong>{discoverySettings.worldwide ? "WORLD" : "CUSTOM"}</strong>
               </div>
               <Bot size={16} />
             </div>
@@ -542,10 +570,9 @@ function App() {
               {discoverLoading ? <Loader2 className="spin" size={16} /> : <Radar size={16} />}
               Найти бизнесы
             </button>
-            <p className="helper-copy">Ищет в OpenStreetMap, берет сайт/телефон, аудирует сайты и добавляет лучшие в CRM.</p>
-          </div>
+          </section>
 
-          <div className="queue-panel">
+          <section className="control-slab queue-slab">
             <div className="panel-head">
               <div>
                 <span>Очередь сайтов</span>
@@ -565,7 +592,7 @@ function App() {
               {queueLoading ? <Loader2 className="spin" size={16} /> : <Zap size={16} />}
               Запустить очередь
             </button>
-          </div>
+          </section>
 
           {error ? (
             <div className="error-banner">
@@ -573,165 +600,145 @@ function App() {
               <span>{error}</span>
             </div>
           ) : null}
-
-          <HistoryPanel history={history} onLoad={(item) => acceptReport(item.report, false)} onClear={clearHistory} />
         </aside>
 
-        <section className="cockpit" id="audit">
-          <div className="cockpit-head">
+        <section className="radar-hub" id="radar">
+          <div className="radar-header">
             <div>
-              <p>Деньги в приоритете</p>
-              <h2>{report.businessName || report.host}</h2>
+              <span>02 / TARGET RADAR</span>
+              <h2>Радар целей</h2>
+            </div>
+            <div className="mission-status">
+              <strong>{radarFeed.length}</strong>
+              <span>целей в фокусе</span>
+            </div>
+          </div>
+
+          <div className="radar-card">
+            <div className="radar-visual" aria-label="Карта найденных бизнесов">
+              <div className="radar-sweep" />
+              <div className="radar-core">
+                <strong>{report.score.total}</strong>
+                <span>{report.score.grade}</span>
+              </div>
+              {radarFeed.slice(0, 6).map((target, index) => (
+                <button
+                  type="button"
+                  key={target.id}
+                  className={`radar-dot dot-${index + 1}`}
+                  title={target.name}
+                >
+                  <span>{target.score || 0}</span>
+                </button>
+              ))}
+            </div>
+
+            <div className="radar-readout">
+              <p>Текущий фокус</p>
+              <h3>{report.businessName || report.host}</h3>
               <a href={report.finalUrl || report.input.url} target="_blank" rel="noreferrer">
                 {report.host}
                 <ExternalLink size={14} />
               </a>
-            </div>
-            <div className="status-stack">
-              <span>{report.score.grade}</span>
-              <strong>{report.score.label}</strong>
-            </div>
-          </div>
-
-          <div className="signal-grid">
-            <ScoreDial score={report.score.total} />
-            <MetricBlock
-              icon={<BadgeDollarSign size={18} />}
-              label="Потенциал/мес"
-              value={money(report.money.monthlyOpportunity)}
-              note={`${report.money.extraLeads} доп. лидов, ${report.money.confidence}% confidence`}
-            />
-            <MetricBlock
-              icon={<TrendingUp size={18} />}
-              label="Пакет продажи"
-              value={report.package.suggestedAnchor}
-              note={report.package.tiers[1].name}
-            />
-            <MetricBlock
-              icon={<Target size={18} />}
-              label="Главный рычаг"
-              value={topPriority?.moneyWeight || 0}
-              note={topPriority?.title || "growth"}
-            />
-          </div>
-
-          <div className="category-strip">
-            {Object.entries(report.score.categories).map(([key, category]) => (
-              <div key={key} className="category-item">
-                <div>
-                  <span>{category.label}</span>
-                  <strong>{Math.round(category.value)}%</strong>
-                </div>
-                <div className="bar" aria-hidden="true">
-                  <i style={{ width: `${category.value}%` }} />
-                </div>
+              <div className="readout-metrics">
+                <MetricBlock
+                  icon={<BadgeDollarSign size={18} />}
+                  label="Потенциал/мес"
+                  value={money(report.money.monthlyOpportunity)}
+                  note={`${report.money.extraLeads} доп. лидов`}
+                />
+                <MetricBlock
+                  icon={<Target size={18} />}
+                  label="Главный рычаг"
+                  value={topPriority?.moneyWeight || 0}
+                  note={topPriority?.title || "growth"}
+                />
               </div>
-            ))}
+            </div>
           </div>
 
-          <div className="main-grid">
-            <section className="priority-zone">
-              <SectionTitle icon={<Activity size={18} />} title="Продаваемые правки" inline />
-              <div className="priority-list">
-                {report.priorities.slice(0, 6).map((priority, index) => (
-                  <article key={`${priority.key}-${index}`} className={`priority-row ${priority.severity}`}>
-                    <div className="rank">{index + 1}</div>
-                    <div>
-                      <div className="row-title">
-                        <h3>{priority.title}</h3>
-                        <span>{priority.moneyWeight}</span>
-                      </div>
-                      <p>{priority.sellLine}</p>
-                      <small>{priority.fix}</small>
-                    </div>
-                  </article>
-                ))}
-              </div>
-            </section>
-
-            <section className="timeline-zone">
-              <SectionTitle icon={<BarChart3 size={18} />} title="Автоматизация" inline />
-              <div className="timeline">
-                {report.automation.steps.map((step) => (
-                  <div key={step.label} className={`timeline-row ${step.status}`}>
-                    <i />
-                    <div>
-                      <strong>{step.label}</strong>
-                      <span>{step.detail}</span>
-                    </div>
+          <section className="target-stream">
+            <SectionTitle icon={<Bot size={18} />} title="Найденные бизнесы автопилотом" inline />
+            <div className="stream-list">
+              {radarFeed.slice(0, 8).map((business) => (
+                <article key={business.id}>
+                  <div className="stream-score">{business.score || 0}</div>
+                  <div>
+                    <strong>{business.name}</strong>
+                    <span>{[business.city, business.country].filter(Boolean).join(", ") || business.website}</span>
                   </div>
-                ))}
-              </div>
-              <div className="money-note">
-                <ShieldCheck size={17} />
-                <span>{report.money.disclaimer}</span>
-              </div>
-            </section>
-          </div>
-
-          <section className="evidence-zone">
-            <SectionTitle icon={<FileText size={18} />} title="Факты из сайта" inline />
-            <div className="evidence-table">
-              {report.evidence.slice(0, 14).map((item) => (
-                <div key={item.label} className="evidence-row">
-                  <span>{item.label}</span>
-                  <strong className={item.good ? "good" : "bad"}>{item.value}</strong>
-                </div>
+                  <div>
+                    <b>{business.website ? "сайт есть" : "сайт не найден"}</b>
+                    <span>{business.topPriority}</span>
+                  </div>
+                  {business.website ? (
+                    <a href={business.website} target="_blank" rel="noreferrer">
+                      сайт
+                    </a>
+                  ) : (
+                    <a href={business.osmUrl} target="_blank" rel="noreferrer">
+                      карта
+                    </a>
+                  )}
+                </article>
               ))}
             </div>
           </section>
 
-          {sortedBulk.length ? (
-            <section className="bulk-zone">
-              <SectionTitle icon={<Radar size={18} />} title="Лучшие цели из очереди" inline />
-              <div className="bulk-list">
-                {sortedBulk.slice(0, 5).map((item) => (
-                  <button key={item.id} onClick={() => acceptReport(item, true)}>
-                    <span>{item.host}</span>
-                    <strong>{money(item.money.monthlyOpportunity)}</strong>
-                    <em>{item.score.total}</em>
-                  </button>
-                ))}
-              </div>
-            </section>
-          ) : null}
+          <section className="intel-deck" id="audit">
+            <div className="category-strip">
+              {Object.entries(report.score.categories).map(([key, category]) => (
+                <div key={key} className="category-item">
+                  <div>
+                    <span>{category.label}</span>
+                    <strong>{Math.round(category.value)}%</strong>
+                  </div>
+                  <div className="bar" aria-hidden="true">
+                    <i style={{ width: `${category.value}%` }} />
+                  </div>
+                </div>
+              ))}
+            </div>
 
-          {rankedDiscovery.length ? (
-            <section className="bulk-zone">
-              <SectionTitle icon={<Bot size={18} />} title="Найденные бизнесы автопилотом" inline />
-              <div className="discovery-list">
-                {rankedDiscovery.slice(0, 12).map((business) => (
-                  <article key={business.id}>
-                    <div>
-                      <strong>{business.name}</strong>
-                      <span>{[business.city, business.country].filter(Boolean).join(", ")}</span>
+            <div className="intel-grid">
+              <section className="priority-zone">
+                <SectionTitle icon={<Activity size={18} />} title="Продаваемые правки" inline />
+                <div className="priority-list">
+                  {report.priorities.slice(0, 5).map((priority, index) => (
+                    <article key={`${priority.key}-${index}`} className={`priority-row ${priority.severity}`}>
+                      <div className="rank">{index + 1}</div>
+                      <div>
+                        <div className="row-title">
+                          <h3>{priority.title}</h3>
+                          <span>{priority.moneyWeight}</span>
+                        </div>
+                        <p>{priority.sellLine}</p>
+                        <small>{priority.fix}</small>
+                      </div>
+                    </article>
+                  ))}
+                </div>
+              </section>
+
+              <section className="evidence-zone">
+                <SectionTitle icon={<FileText size={18} />} title="Факты из сайта" inline />
+                <div className="evidence-table">
+                  {report.evidence.slice(0, 10).map((item) => (
+                    <div key={item.label} className="evidence-row">
+                      <span>{item.label}</span>
+                      <strong className={item.good ? "good" : "bad"}>{item.value}</strong>
                     </div>
-                    <div>
-                      <b>{business.website ? "сайт есть" : "сайт не найден"}</b>
-                      <span>{business.topPriority}</span>
-                    </div>
-                    <div>
-                      <em>{business.score || 0}</em>
-                      {business.website ? (
-                        <a href={business.website} target="_blank" rel="noreferrer">
-                          сайт
-                        </a>
-                      ) : (
-                        <a href={business.osmUrl} target="_blank" rel="noreferrer">
-                          карта
-                        </a>
-                      )}
-                    </div>
-                  </article>
-                ))}
-              </div>
-            </section>
-          ) : null}
+                  ))}
+                </div>
+              </section>
+            </div>
+          </section>
         </section>
 
-        <aside className="action-rail">
-          <section>
-            <SectionTitle icon={<Mail size={18} />} title="Готовое сообщение" />
+        <aside className="deal-drawer" id="deal">
+          <section className="drawer-section message-section">
+            <div className="slab-kicker">03 / OUTREACH</div>
+            <SectionTitle icon={<Mail size={18} />} title="Сообщение" />
             <div className="message-tabs">
               {messageTabs.map((tab) => (
                 <button
@@ -744,14 +751,14 @@ function App() {
               ))}
             </div>
             <textarea className="message-box" readOnly value={activeMessage} />
-            <button className="secondary-button wide" onClick={() => copyText("message", activeMessage)}>
+            <button className="primary-button wide" onClick={() => copyText("message", activeMessage)}>
               {copied === "message" ? <Check size={16} /> : <Copy size={16} />}
               Скопировать
             </button>
           </section>
 
-          <section className="package-panel">
-            <SectionTitle icon={<BadgeDollarSign size={18} />} title="Пакет на продажу" inline />
+          <section className="drawer-section package-panel">
+            <SectionTitle icon={<BadgeDollarSign size={18} />} title="Пакет" inline />
             {report.package.tiers.map((tier) => (
               <div key={tier.name} className="tier-row">
                 <div>
@@ -764,7 +771,7 @@ function App() {
             <p>{report.package.objectionHandler}</p>
           </section>
 
-          <section className="crm-panel" id="crm">
+          <section className="drawer-section crm-panel" id="crm">
             <div className="panel-head">
               <div>
                 <span>CRM</span>
@@ -798,7 +805,7 @@ function App() {
             </div>
           </section>
 
-          <section className="export-panel" id="export">
+          <section className="drawer-section export-panel" id="export">
             <SectionTitle icon={<ArrowDownToLine size={18} />} title="Экспорт" inline />
             <button className="secondary-button" onClick={downloadHtml}>
               <Download size={16} />
@@ -818,7 +825,7 @@ function App() {
             </button>
           </section>
 
-          <section className="next-actions">
+          <section className="drawer-section next-actions">
             <SectionTitle icon={<Send size={18} />} title="Следующий шаг" inline />
             {report.nextActions.map((action) => (
               <div key={action} className="next-row">
@@ -827,6 +834,8 @@ function App() {
               </div>
             ))}
           </section>
+
+          <HistoryPanel history={history} onLoad={(item) => acceptReport(item.report, false)} onClear={clearHistory} />
         </aside>
       </main>
     </div>
