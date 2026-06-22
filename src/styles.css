@@ -896,6 +896,146 @@ select:focus {
   font-size: 22px;
 }
 
+.background-job-card {
+  display: grid;
+  gap: 9px;
+  min-width: 0;
+  border: 1px solid rgba(56, 213, 255, 0.24);
+  border-radius: 8px;
+  background:
+    linear-gradient(135deg, rgba(47, 125, 255, 0.12), rgba(255, 255, 255, 0.025) 42%, transparent),
+    rgba(3, 7, 14, 0.88);
+}
+
+.background-job-card.compact {
+  margin-top: 10px;
+  padding: 10px;
+}
+
+.background-job-card.wide {
+  margin: 10px 0;
+  padding: 11px;
+}
+
+.background-job-card.running {
+  border-color: rgba(56, 213, 255, 0.48);
+  box-shadow: inset 0 0 0 1px rgba(56, 213, 255, 0.08);
+}
+
+.background-job-card.completed {
+  border-color: rgba(115, 230, 255, 0.38);
+}
+
+.background-job-card.failed {
+  border-color: rgba(255, 101, 117, 0.48);
+}
+
+.job-title-row,
+.job-footer {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  justify-content: space-between;
+  min-width: 0;
+}
+
+.job-title-row span,
+.job-status-grid > div:first-child span {
+  color: var(--cyan);
+  font-size: 10px;
+  font-weight: 850;
+  letter-spacing: 0;
+  text-transform: uppercase;
+}
+
+.job-title-row strong,
+.job-status-grid strong {
+  color: var(--text);
+  font-size: 13px;
+  line-height: 1.2;
+}
+
+.background-job-card p {
+  margin: 0;
+  color: var(--soft);
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.job-progress {
+  position: relative;
+  overflow: hidden;
+  height: 7px;
+  border: 1px solid rgba(143, 199, 255, 0.18);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.job-progress.large {
+  height: 9px;
+}
+
+.job-progress span {
+  display: block;
+  width: 0;
+  height: 100%;
+  border-radius: inherit;
+  background: linear-gradient(90deg, var(--blue), var(--cyan));
+  transition: width 0.25s ease;
+}
+
+.job-meta,
+.job-footer {
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.35;
+}
+
+.job-meta {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.job-status-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) repeat(3, minmax(64px, 0.16fr));
+  gap: 8px;
+  align-items: stretch;
+}
+
+.job-status-grid > div:first-child {
+  min-width: 0;
+}
+
+.job-stat {
+  display: grid;
+  place-items: center;
+  min-height: 58px;
+  padding: 8px;
+  border: 1px solid rgba(143, 199, 255, 0.12);
+  border-radius: 7px;
+  background: rgba(255, 255, 255, 0.025);
+}
+
+.job-stat b {
+  color: var(--cyan);
+  font-size: 20px;
+  line-height: 1;
+}
+
+.job-stat span {
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.secondary-button.mini {
+  min-height: 30px;
+  font-size: 11px;
+}
+
 .lead-workbench {
   display: grid;
   gap: 12px;
@@ -1622,12 +1762,23 @@ select:focus {
 }
 
 @media (max-width: 980px) {
+  html,
+  body {
+    max-width: 100%;
+    overflow-x: hidden;
+  }
+
   .app-shell {
+    width: 100%;
+    max-width: 100%;
+    overflow-x: hidden;
     padding: 10px;
   }
 
   .topbar,
   .mission-grid,
+  .launch-column,
+  .radar-hub,
   .radar-card,
   .intel-grid,
   .category-strip,
@@ -1636,6 +1787,7 @@ select:focus {
   .money-summary-grid,
   .money-lead-grid,
   .money-card-meta,
+  .job-status-grid,
   .workbench-main,
   .workbench-grid,
   .workbench-actions,
@@ -1643,6 +1795,18 @@ select:focus {
   .deal-drawer,
   .stream-list article {
     grid-template-columns: 1fr;
+    min-width: 0;
+    max-width: 100%;
+  }
+
+  .brand {
+    min-width: 0;
+  }
+
+  .brand h1,
+  .brand span {
+    overflow-wrap: anywhere;
+    white-space: normal;
   }
 
   .topbar,
@@ -1689,6 +1853,11 @@ select:focus {
 
   .workbench-heading h3 {
     white-space: normal;
+  }
+
+  .job-footer {
+    align-items: stretch;
+    flex-direction: column;
   }
 }
 

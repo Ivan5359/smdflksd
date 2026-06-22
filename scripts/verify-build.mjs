@@ -18,6 +18,10 @@ const expectedMarkers = [
   "Запустить money machine",
   "Горячие лиды",
   "Lead Workbench",
+  "Фоновый режим",
+  "Скан продолжается",
+  "Последний скан",
+  "Серверный job",
   "Проверить сайт",
   "TXT pack",
   "Google поиск"

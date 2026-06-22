@@ -79,6 +79,8 @@ const defaultDiscoveryLocations = [
   "Dubai, UAE"
 ].join("\n");
 
+const emptyMoneyMachine = { leads: [], pipeline: null, totals: null, searchedLocations: [], jobId: "" };
+
 const nichePresets = [
   { label: "Dentist", niche: "dentist", averageSale: 500, monthlyVisitors: 700 },
   { label: "Clinic", niche: "clinic", averageSale: 650, monthlyVisitors: 900 },
@@ -146,9 +148,8 @@ function App() {
     monthlyRetainer: 180,
     closeRate: 12
   });
-  const [moneyMachine, setMoneyMachine] = useState(() =>
-    readLocal("sitemoney.moneyMachine", { leads: [], pipeline: null, totals: null, searchedLocations: [] })
-  );
+  const [moneyMachine, setMoneyMachine] = useState(() => readInitialMoneyMachine());
+  const [backgroundJob, setBackgroundJob] = useState(() => readInitialBackgroundJob());
   const [leadFilter, setLeadFilter] = useState({
     query: "",
     onlyWebsite: false,
@@ -172,6 +173,48 @@ function App() {
       .then((payload) => setServerVersion(payload.version || APP_VERSION))
       .catch(() => setServerVersion(APP_VERSION));
   }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    async function restoreLatestJob() {
+      try {
+        const response = await fetch("/api/jobs/latest?type=lead-machine", { cache: "no-store" });
+        const payload = await response.json();
+        if (cancelled) return;
+        if (!payload.job) {
+          clearBackgroundJob();
+          resetMoneyMachine();
+          return;
+        }
+        rememberBackgroundJob(payload.job);
+        const active = ["queued", "running"].includes(payload.job.status);
+        setMoneyLoading(active);
+        if (payload.job.status === "completed" && payload.job.result) {
+          applyMoneyMachineData(payload.job.result, payload.job, false);
+        }
+      } catch {
+        // The site still works as a local saved dashboard if the server job endpoint is not ready yet.
+      }
+    }
+    restoreLatestJob();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!backgroundJob?.id || !["queued", "running"].includes(backgroundJob.status)) return undefined;
+    let cancelled = false;
+    const poll = () => {
+      if (!cancelled) syncBackgroundJob(backgroundJob.id, true);
+    };
+    poll();
+    const timer = window.setInterval(poll, 3000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [backgroundJob?.id, backgroundJob?.status]);
 
   useEffect(() => {
     const scrollToHash = () => {
@@ -252,6 +295,10 @@ function App() {
 
   const moneyLeads = useMemo(() => (moneyMachine.leads || []).map(normalizeLead), [moneyMachine]);
   const moneyPipeline = moneyMachine.pipeline || {};
+  const activeBackgroundJob = Boolean(backgroundJob && ["queued", "running"].includes(backgroundJob.status));
+  const backgroundProgress = backgroundJob?.progress || {};
+  const backgroundPercent = Math.min(100, Math.max(0, Number(backgroundProgress.percent || 0)));
+  const moneyMachineBusy = moneyLoading || activeBackgroundJob;
   const hotMoneyLeads = moneyLeads.filter((lead) => lead.priority === "hot").length;
   const selectedMoneyLead = useMemo(
     () => moneyLeads.find((lead) => lead.id === selectedLeadId) || moneyLeads[0] || null,
@@ -406,13 +453,93 @@ function App() {
     }
   }
 
+  function rememberBackgroundJob(job) {
+    if (!job) return;
+    setBackgroundJob(job);
+    writeLocal("sitemoney.backgroundJob", job);
+  }
+
+  function clearBackgroundJob() {
+    setBackgroundJob(null);
+    removeLocal("sitemoney.backgroundJob");
+  }
+
+  function resetMoneyMachine() {
+    setMoneyMachine(emptyMoneyMachine);
+    setDiscoveredBusinesses([]);
+    removeLocal("sitemoney.moneyMachine");
+  }
+
+  function applyMoneyMachineData(data, sourceJob = null, notify = true) {
+    if (!data) return;
+    const nextMachine = {
+      ...data,
+      jobId: sourceJob?.id || data.jobId || ""
+    };
+    setMoneyMachine(nextMachine);
+    writeLocal("sitemoney.moneyMachine", nextMachine);
+    setDiscoveredBusinesses(data.leads || []);
+
+    const normalizedLeads = (data.leads || []).map(normalizeLead);
+    if (normalizedLeads.length) setSelectedLeadId(normalizedLeads[0].id);
+
+    const reportItems = (data.reports || []).map((item) => ({ ok: true, report: item }));
+    setBulkResults(reportItems);
+    const firstReport = data.reports?.[0];
+    if (firstReport) acceptReport(firstReport, true);
+
+    if (form.createCrmTasks && data.leads?.length) {
+      const newTasks = data.leads.slice(0, 12).map((item) => crmFromBusiness(item));
+      setCrm((current) => {
+        const next = mergeCrm(newTasks, current);
+        writeLocal("sitemoney.crm", next);
+        return next;
+      });
+    }
+
+    if (data.leads?.length) {
+      setSavedLeads((current) => {
+        const next = mergeLeads(data.leads.slice(0, 12), current);
+        writeLocal("sitemoney.savedLeads", next);
+        return next;
+      });
+    }
+
+    if (notify) {
+      setCopied("money-machine");
+      window.setTimeout(() => setCopied(""), 1600);
+    }
+  }
+
+  async function syncBackgroundJob(jobId = backgroundJob?.id, silent = false) {
+    if (!jobId) return;
+    try {
+      const response = await fetch(`/api/jobs/${encodeURIComponent(jobId)}`, { cache: "no-store" });
+      const payload = await response.json();
+      if (!response.ok) throw new Error(payload.error || "Job status failed");
+      const job = payload.job;
+      rememberBackgroundJob(job);
+      const active = ["queued", "running"].includes(job.status);
+      setMoneyLoading(active);
+      if (job.status === "completed" && job.result) {
+        applyMoneyMachineData(job.result, job, !silent);
+      }
+      if (job.status === "failed") {
+        setError(job.error || "Фоновый скан завершился ошибкой.");
+      }
+    } catch (jobError) {
+      if (!silent) setError(jobError.message || "Не удалось обновить серверный job.");
+      setMoneyLoading(false);
+    }
+  }
+
   async function runMoneyMachine() {
     setMoneyLoading(true);
     setError("");
     setCopied("");
 
     try {
-      const response = await fetch("/api/lead-machine", {
+      const response = await fetch("/api/lead-machine/jobs", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -426,36 +553,12 @@ function App() {
       const data = await response.json();
       if (!response.ok) throw new Error(data.error || "Money machine failed");
 
-      setMoneyMachine(data);
-      writeLocal("sitemoney.moneyMachine", data);
-      setDiscoveredBusinesses(data.leads || []);
-      const normalizedLeads = (data.leads || []).map(normalizeLead);
-      if (normalizedLeads.length) setSelectedLeadId(normalizedLeads[0].id);
-
-      const reportItems = (data.reports || []).map((item) => ({ ok: true, report: item }));
-      setBulkResults(reportItems);
-      const firstReport = data.reports?.[0];
-      if (firstReport) acceptReport(firstReport, true);
-
-      if (form.createCrmTasks && data.leads?.length) {
-        const newTasks = data.leads.slice(0, 12).map((item) => crmFromBusiness(item));
-        const next = mergeCrm(newTasks, crm);
-        setCrm(next);
-        writeLocal("sitemoney.crm", next);
-      }
-
-      if (data.leads?.length) {
-        const nextSaved = mergeLeads(data.leads.slice(0, 12), savedLeads);
-        setSavedLeads(nextSaved);
-        writeLocal("sitemoney.savedLeads", nextSaved);
-      }
-
-      setCopied("money-machine");
+      rememberBackgroundJob(data.job);
+      setCopied("background-scan");
       window.setTimeout(() => setCopied(""), 1600);
     } catch (machineError) {
-      setError(machineError.message || "Не удалось запустить money machine.");
-    } finally {
       setMoneyLoading(false);
+      setError(machineError.message || "Не удалось запустить money machine.");
     }
   }
 
@@ -788,8 +891,8 @@ function App() {
             {discoverLoading ? <Loader2 className="spin" size={16} /> : <Radar size={16} />}
             Найти бизнесы
           </button>
-          <button className="primary-button" onClick={runMoneyMachine} disabled={moneyLoading}>
-            {moneyLoading ? <Loader2 className="spin" size={16} /> : <BadgeDollarSign size={16} />}
+          <button className="primary-button" onClick={runMoneyMachine} disabled={moneyMachineBusy}>
+            {moneyMachineBusy ? <Loader2 className="spin" size={16} /> : <BadgeDollarSign size={16} />}
             Money Machine
           </button>
         </div>
@@ -1030,10 +1133,29 @@ function App() {
                 />
               </label>
             </div>
-            <button className="primary-button wide" onClick={runMoneyMachine} disabled={moneyLoading}>
-              {moneyLoading ? <Loader2 className="spin" size={16} /> : <BadgeDollarSign size={16} />}
+            <button className="primary-button wide" onClick={runMoneyMachine} disabled={moneyMachineBusy}>
+              {moneyMachineBusy ? <Loader2 className="spin" size={16} /> : <BadgeDollarSign size={16} />}
               Запустить money machine
             </button>
+            {backgroundJob ? (
+              <div className={`background-job-card compact ${backgroundJob.status}`}>
+                <div className="job-title-row">
+                  <span>Фоновый режим</span>
+                  <strong>{jobStatusLabel(backgroundJob.status)}</strong>
+                </div>
+                <p>{backgroundProgress.message || "Серверный job готовит поиск."}</p>
+                <div className="job-progress" aria-label="Прогресс фонового скана">
+                  <span style={{ width: `${backgroundPercent}%` }} />
+                </div>
+                <div className="job-meta">
+                  <span>Серверный job {shortJobId(backgroundJob.id)}</span>
+                  <span>{backgroundPercent}%</span>
+                </div>
+                <button className="secondary-button wide mini" type="button" onClick={() => syncBackgroundJob(backgroundJob.id)}>
+                  Обновить job
+                </button>
+              </div>
+            ) : null}
           </section>
 
           <section className="control-slab queue-slab">
@@ -1134,8 +1256,8 @@ function App() {
             <div className="stream-head">
               <SectionTitle icon={<BadgeDollarSign size={18} />} title="Money Machine" inline />
               <div className="stream-actions">
-                <button className="secondary-button" onClick={runMoneyMachine} disabled={moneyLoading}>
-                  {moneyLoading ? <Loader2 className="spin" size={15} /> : <Play size={15} />}
+                <button className="secondary-button" onClick={runMoneyMachine} disabled={moneyMachineBusy}>
+                  {moneyMachineBusy ? <Loader2 className="spin" size={15} /> : <Play size={15} />}
                   Запуск
                 </button>
                 <button className="secondary-button" onClick={downloadMoneyCsv} disabled={!moneyLeads.length}>
@@ -1148,6 +1270,39 @@ function App() {
                 </button>
               </div>
             </div>
+
+            {backgroundJob ? (
+              <section className={`background-job-card wide ${backgroundJob.status}`} aria-label="Фоновый режим Money Machine">
+                <div className="job-status-grid">
+                  <div>
+                    <span>Последний скан</span>
+                    <strong>{jobStatusLabel(backgroundJob.status)}</strong>
+                    <p>{backgroundProgress.message || "Серверный job ожидает обновления."}</p>
+                  </div>
+                  <div className="job-stat">
+                    <b>{backgroundProgress.found || moneyMachine.totals?.found || 0}</b>
+                    <span>найдено</span>
+                  </div>
+                  <div className="job-stat">
+                    <b>{backgroundProgress.audited || moneyMachine.totals?.audited || 0}</b>
+                    <span>аудит</span>
+                  </div>
+                  <div className="job-stat">
+                    <b>{backgroundProgress.ranked || moneyMachine.totals?.ranked || 0}</b>
+                    <span>лиды</span>
+                  </div>
+                </div>
+                <div className="job-progress large" aria-label="Прогресс серверного job">
+                  <span style={{ width: `${backgroundPercent}%` }} />
+                </div>
+                <div className="job-footer">
+                  <span>Серверный job {shortJobId(backgroundJob.id)} · {formatJobTime(backgroundJob.updatedAt || backgroundJob.createdAt)}</span>
+                  <button className="secondary-button" type="button" onClick={() => syncBackgroundJob(backgroundJob.id)}>
+                    Обновить job
+                  </button>
+                </div>
+              </section>
+            ) : null}
 
             <div className="money-summary-grid">
               <MetricBlock
@@ -1762,6 +1917,60 @@ function readLocal(key, fallback) {
 
 function writeLocal(key, value) {
   localStorage.setItem(key, JSON.stringify(value));
+}
+
+function removeLocal(key) {
+  try {
+    localStorage.removeItem(key);
+  } catch {
+    // Ignore private-mode storage failures.
+  }
+}
+
+function readInitialBackgroundJob() {
+  const savedJob = readLocal("sitemoney.backgroundJob", null);
+  return savedJob?.id ? savedJob : null;
+}
+
+function readInitialMoneyMachine() {
+  const savedJob = readInitialBackgroundJob();
+  const savedMachine = readLocal("sitemoney.moneyMachine", emptyMoneyMachine);
+  const machineJobId = savedMachine?.jobId || "";
+  const hasServerBackedResult = Boolean(savedJob?.id && machineJobId && machineJobId === savedJob.id);
+  if (!hasServerBackedResult) {
+    removeLocal("sitemoney.moneyMachine");
+    return emptyMoneyMachine;
+  }
+  return {
+    ...emptyMoneyMachine,
+    ...savedMachine
+  };
+}
+
+function jobStatusLabel(status) {
+  if (status === "queued") return "Скан в очереди";
+  if (status === "running") return "Скан продолжается";
+  if (status === "completed") return "Последний скан готов";
+  if (status === "failed") return "Скан с ошибкой";
+  return "Серверный job";
+}
+
+function shortJobId(id) {
+  return String(id || "").replace(/^job-/, "").slice(0, 12) || "нет ID";
+}
+
+function formatJobTime(value) {
+  if (!value) return "время не получено";
+  try {
+    return new Intl.DateTimeFormat("ru-RU", {
+      hour: "2-digit",
+      minute: "2-digit",
+      day: "2-digit",
+      month: "2-digit"
+    }).format(new Date(value));
+  } catch {
+    return String(value);
+  }
 }
 
 function money(value) {

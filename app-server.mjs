@@ -16,6 +16,8 @@ const __dirname = path.dirname(__filename);
 const PORT = Number(process.env.PORT || 8787);
 const DATA_DIR = path.join(__dirname, "data");
 const REPORTS_PATH = path.join(DATA_DIR, "reports.json");
+const JOBS_PATH = path.join(DATA_DIR, "jobs.json");
+const MAX_STORED_JOBS = 40;
 const DIST_DIR = path.join(__dirname, "dist");
 const DEPLOY_MARKER = `GITHUB_ROOT_UPLOAD_${APP_VERSION}`;
 const DEPLOY_MARKER_PATH = path.join(__dirname, "DEPLOYMENT_MARKER.txt");
@@ -36,9 +38,11 @@ const REQUIRED_ROOT_ITEMS = [
   "nixpacks.toml",
   "pnpm-lock.yaml"
 ];
+const jobsCache = new Map();
 
 const app = express();
 app.use(express.json({ limit: "1mb" }));
+await loadJobs();
 
 app.get("/health", (_request, response) => {
   response.json({ ok: true, version: APP_VERSION });
@@ -150,41 +154,47 @@ app.post("/api/discover", async (request, response) => {
 
 app.post("/api/lead-machine", async (request, response) => {
   try {
-    const payload = normalizeDiscoveryPayload({
-      ...request.body,
-      auditFound: request.body?.auditFound !== false,
-      limit: request.body?.limit || 45,
-      auditLimit: request.body?.auditLimit || 10,
-      locationLimit: request.body?.locationLimit || 8
-    });
-    const machine = normalizeLeadMachinePayload(request.body || {});
-    const discovery = await runBusinessDiscovery(payload, request.body || {});
-    const leads = buildMoneyMachineLeads(discovery.businesses, discovery.reports, payload, machine)
-      .filter((lead) => lead.moneyScore >= machine.minMoneyScore)
-      .slice(0, machine.maxLeads);
-    const pipeline = summarizeMoneyPipeline(leads);
-
-    response.json({
-      version: APP_VERSION,
-      source: "openstreetmap-overpass",
-      generatedAt: new Date().toISOString(),
-      query: { ...payload, ...machine },
-      searchedLocations: discovery.locations.map((item) => item.label),
-      warnings: discovery.warnings,
-      totals: {
-        found: discovery.rawBusinesses.length,
-        ranked: leads.length,
-        withWebsite: leads.filter((lead) => lead.website).length,
-        withoutWebsite: leads.filter((lead) => !lead.website).length,
-        audited: discovery.reports.length
-      },
-      pipeline,
-      leads,
-      reports: discovery.reports
-    });
+    const data = await executeLeadMachine(request.body || {});
+    response.json(data);
   } catch (error) {
     response.status(400).json({ error: error.message || "Lead machine failed" });
   }
+});
+
+app.post("/api/lead-machine/jobs", async (request, response) => {
+  try {
+    const job = await startLeadMachineJob(request.body || {});
+    response.status(202).json({
+      ok: true,
+      version: APP_VERSION,
+      job: publicJob(job),
+      statusUrl: `/api/jobs/${job.id}`
+    });
+  } catch (error) {
+    response.status(400).json({ error: error.message || "Could not start background scan" });
+  }
+});
+
+app.get("/api/jobs/latest", (request, response) => {
+  const type = String(request.query.type || "lead-machine");
+  response.json({
+    ok: true,
+    version: APP_VERSION,
+    job: publicJob(latestJob(type))
+  });
+});
+
+app.get("/api/jobs/:id", (request, response) => {
+  const job = jobsCache.get(request.params.id);
+  if (!job) {
+    response.status(404).json({ ok: false, error: "Job not found" });
+    return;
+  }
+  response.json({
+    ok: true,
+    version: APP_VERSION,
+    job: publicJob(job)
+  });
 });
 
 app.get("/api/reports", async (_request, response) => {
@@ -215,6 +225,9 @@ app.get(/.*/, async (_request, response, next) => {
 
 app.listen(PORT, () => {
   console.log(`SiteMoney Audit ${APP_VERSION} running on http://127.0.0.1:${PORT}`);
+  resumeInterruptedJobs().catch((error) => {
+    console.error("Could not resume background jobs", error);
+  });
 });
 
 async function ensureFreshFrontendBuild() {
@@ -278,6 +291,241 @@ async function auditSingle(input) {
   }
 }
 
+async function executeLeadMachine(input = {}, onProgress = null) {
+  const payload = normalizeDiscoveryPayload({
+    ...input,
+    auditFound: input?.auditFound !== false,
+    limit: input?.limit || 45,
+    auditLimit: input?.auditLimit || 10,
+    locationLimit: input?.locationLimit || 8
+  });
+  const machine = normalizeLeadMachinePayload(input || {});
+  await reportProgress(onProgress, {
+    phase: "prepare",
+    message: "Готовлю фоновый поиск бизнесов",
+    percent: 3,
+    found: 0,
+    audited: 0,
+    ranked: 0
+  });
+
+  const discovery = await runBusinessDiscovery(payload, input || {}, onProgress);
+  await reportProgress(onProgress, {
+    phase: "rank",
+    message: "Ранжирую лиды по деньгам и удобству контакта",
+    percent: 92,
+    found: discovery.rawBusinesses.length,
+    audited: discovery.reports.length
+  });
+
+  const leads = buildMoneyMachineLeads(discovery.businesses, discovery.reports, payload, machine)
+    .filter((lead) => lead.moneyScore >= machine.minMoneyScore)
+    .slice(0, machine.maxLeads);
+  const pipeline = summarizeMoneyPipeline(leads);
+
+  await reportProgress(onProgress, {
+    phase: "completed",
+    message: `Скан завершен: найдено ${leads.length} лидов`,
+    percent: 100,
+    found: discovery.rawBusinesses.length,
+    audited: discovery.reports.length,
+    ranked: leads.length
+  });
+
+  return {
+    version: APP_VERSION,
+    source: "openstreetmap-overpass",
+    generatedAt: new Date().toISOString(),
+    query: { ...payload, ...machine },
+    searchedLocations: discovery.locations.map((item) => item.label),
+    warnings: discovery.warnings,
+    totals: {
+      found: discovery.rawBusinesses.length,
+      ranked: leads.length,
+      withWebsite: leads.filter((lead) => lead.website).length,
+      withoutWebsite: leads.filter((lead) => !lead.website).length,
+      audited: discovery.reports.length
+    },
+    pipeline,
+    leads,
+    reports: discovery.reports
+  };
+}
+
+async function startLeadMachineJob(input = {}) {
+  const now = new Date().toISOString();
+  const job = {
+    id: createJobId(),
+    type: "lead-machine",
+    status: "queued",
+    createdAt: now,
+    updatedAt: now,
+    startedAt: "",
+    completedAt: "",
+    input,
+    progress: {
+      phase: "queued",
+      message: "Фоновый режим включен: сервер принял скан в работу",
+      percent: 0,
+      found: 0,
+      audited: 0,
+      ranked: 0
+    },
+    result: null,
+    error: ""
+  };
+  await saveJob(job);
+  setTimeout(() => {
+    runLeadMachineJob(job.id).catch((error) => {
+      console.error(`Background lead-machine job ${job.id} crashed`, error);
+    });
+  }, 0);
+  return job;
+}
+
+async function runLeadMachineJob(jobId) {
+  const job = jobsCache.get(jobId);
+  if (!job || job.status === "completed") return;
+
+  job.status = "running";
+  job.startedAt = job.startedAt || new Date().toISOString();
+  job.progress = {
+    ...job.progress,
+    phase: "running",
+    message: "Скан продолжается на сервере",
+    percent: Math.max(1, Number(job.progress?.percent || 0))
+  };
+  await saveJob(job);
+
+  const onProgress = async (patch) => {
+    const current = jobsCache.get(jobId);
+    if (!current || current.status !== "running") return;
+    current.progress = {
+      ...current.progress,
+      ...patch,
+      updatedAt: new Date().toISOString()
+    };
+    await saveJob(current);
+  };
+
+  try {
+    const result = await executeLeadMachine(job.input || {}, onProgress);
+    const done = jobsCache.get(jobId) || job;
+    done.status = "completed";
+    done.completedAt = new Date().toISOString();
+    done.result = result;
+    done.error = "";
+    done.progress = {
+      ...done.progress,
+      phase: "completed",
+      message: `Последний скан готов: ${result.totals?.ranked || 0} лидов`,
+      percent: 100,
+      found: result.totals?.found || 0,
+      audited: result.totals?.audited || 0,
+      ranked: result.totals?.ranked || 0,
+      updatedAt: new Date().toISOString()
+    };
+    await saveJob(done);
+  } catch (error) {
+    const failed = jobsCache.get(jobId) || job;
+    failed.status = "failed";
+    failed.completedAt = new Date().toISOString();
+    failed.error = error.message || "Lead machine failed";
+    failed.progress = {
+      ...failed.progress,
+      phase: "failed",
+      message: failed.error,
+      updatedAt: new Date().toISOString()
+    };
+    await saveJob(failed);
+  }
+}
+
+async function resumeInterruptedJobs() {
+  const interrupted = [...jobsCache.values()].filter((job) =>
+    job.type === "lead-machine" && ["queued", "running"].includes(job.status)
+  );
+  for (const job of interrupted) {
+    job.status = "queued";
+    job.progress = {
+      ...job.progress,
+      phase: "queued",
+      message: "Сервер перезапущен, скан продолжен заново по сохраненным настройкам"
+    };
+    await saveJob(job);
+    setTimeout(() => {
+      runLeadMachineJob(job.id).catch((error) => {
+        console.error(`Could not resume lead-machine job ${job.id}`, error);
+      });
+    }, 250);
+  }
+}
+
+async function reportProgress(onProgress, patch) {
+  if (!onProgress) return;
+  await onProgress(patch);
+}
+
+function publicJob(job) {
+  if (!job) return null;
+  return {
+    id: job.id,
+    type: job.type,
+    status: job.status,
+    createdAt: job.createdAt,
+    updatedAt: job.updatedAt,
+    startedAt: job.startedAt,
+    completedAt: job.completedAt,
+    progress: job.progress || {},
+    input: job.input || {},
+    result: job.result || null,
+    error: job.error || ""
+  };
+}
+
+function latestJob(type = "lead-machine") {
+  return [...jobsCache.values()]
+    .filter((job) => job.type === type)
+    .sort((a, b) => new Date(b.createdAt || 0) - new Date(a.createdAt || 0))[0] || null;
+}
+
+async function loadJobs() {
+  const jobs = await readJobs();
+  jobsCache.clear();
+  for (const job of jobs) {
+    if (job?.id) jobsCache.set(job.id, job);
+  }
+}
+
+async function readJobs() {
+  try {
+    const raw = await fs.readFile(JOBS_PATH, "utf8");
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
+async function saveJob(job) {
+  job.updatedAt = new Date().toISOString();
+  jobsCache.set(job.id, job);
+  await persistJobs();
+  return job;
+}
+
+async function persistJobs() {
+  await fs.mkdir(DATA_DIR, { recursive: true });
+  const jobs = [...jobsCache.values()]
+    .sort((a, b) => new Date(b.createdAt || 0) - new Date(a.createdAt || 0))
+    .slice(0, MAX_STORED_JOBS);
+  await fs.writeFile(JOBS_PATH, JSON.stringify(jobs, null, 2));
+}
+
+function createJobId() {
+  return `job-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
 async function inspectFrontendBuild() {
   const markers = {
     version: APP_VERSION,
@@ -291,6 +539,10 @@ async function inspectFrontendBuild() {
     runMoneyMachine: "Запустить money machine",
     hotLeads: "Горячие лиды",
     leadWorkbench: "Lead Workbench",
+    backgroundMode: "Фоновый режим",
+    scanContinues: "Скан продолжается",
+    latestScan: "Последний скан",
+    serverJob: "Серверный job",
     safeAuditAction: "Проверить сайт",
     outreachPack: "TXT pack",
     googleSearch: "Google поиск"
@@ -428,7 +680,7 @@ function normalizeQueue(value) {
     .filter(Boolean);
 }
 
-async function runBusinessDiscovery(payload, input = {}) {
+async function runBusinessDiscovery(payload, input = {}, onProgress = null) {
   const locations = payload.worldwide
     ? WORLD_LOCATIONS.slice(0, payload.locationLimit)
     : await resolveLocations(payload);
@@ -436,9 +688,27 @@ async function runBusinessDiscovery(payload, input = {}) {
   const seen = new Set();
   const warnings = [];
 
-  for (const location of locations) {
+  await reportProgress(onProgress, {
+    phase: "search",
+    message: `Ищу бизнесы в ${locations.length} локациях`,
+    percent: 8,
+    totalLocations: locations.length,
+    searchedLocations: [],
+    found: 0
+  });
+
+  for (const [locationIndex, location] of locations.entries()) {
     let businesses = [];
     try {
+      await reportProgress(onProgress, {
+        phase: "search",
+        message: `Поиск: ${location.label}`,
+        percent: Math.min(72, 10 + Math.round((locationIndex / Math.max(locations.length, 1)) * 52)),
+        currentLocation: location.label,
+        totalLocations: locations.length,
+        searchedLocations: locations.slice(0, locationIndex).map((item) => item.label),
+        found: rawBusinesses.length
+      });
       businesses = await searchBusinesses(location, payload);
     } catch (error) {
       warnings.push(`${location.label}: ${error.message || "search failed"}`);
@@ -451,6 +721,15 @@ async function runBusinessDiscovery(payload, input = {}) {
       rawBusinesses.push(business);
       if (rawBusinesses.length >= payload.limit) break;
     }
+    await reportProgress(onProgress, {
+      phase: "search",
+      message: `Найдено ${rawBusinesses.length} бизнесов после ${location.label}`,
+      percent: Math.min(72, 14 + Math.round(((locationIndex + 1) / Math.max(locations.length, 1)) * 52)),
+      currentLocation: location.label,
+      totalLocations: locations.length,
+      searchedLocations: locations.slice(0, locationIndex + 1).map((item) => item.label),
+      found: rawBusinesses.length
+    });
     if (rawBusinesses.length >= payload.limit) break;
   }
 
@@ -460,7 +739,25 @@ async function runBusinessDiscovery(payload, input = {}) {
 
   const reports = [];
   if (payload.auditFound) {
-    for (const business of rawBusinesses.filter((item) => item.website).slice(0, payload.auditLimit)) {
+    const auditTargets = rawBusinesses.filter((item) => item.website).slice(0, payload.auditLimit);
+    await reportProgress(onProgress, {
+      phase: "audit",
+      message: auditTargets.length ? `Аудирую ${auditTargets.length} сайтов` : "Нет сайтов для авто-аудита, ранжирую контакты",
+      percent: 74,
+      found: rawBusinesses.length,
+      audited: 0,
+      totalAudit: auditTargets.length
+    });
+    for (const [auditIndex, business] of auditTargets.entries()) {
+      await reportProgress(onProgress, {
+        phase: "audit",
+        message: `Аудит ${auditIndex + 1}/${auditTargets.length}: ${business.name}`,
+        percent: Math.min(90, 74 + Math.round((auditIndex / Math.max(auditTargets.length, 1)) * 16)),
+        found: rawBusinesses.length,
+        audited: reports.length,
+        totalAudit: auditTargets.length,
+        currentBusiness: business.name
+      });
       const report = await auditSingle({
         ...input,
         url: business.website,
@@ -475,6 +772,15 @@ async function runBusinessDiscovery(payload, input = {}) {
       report.discoveredBusiness = business;
       await rememberReport(report);
       reports.push(report);
+      await reportProgress(onProgress, {
+        phase: "audit",
+        message: `Готов аудит ${reports.length}/${auditTargets.length}: ${business.name}`,
+        percent: Math.min(90, 74 + Math.round(((auditIndex + 1) / Math.max(auditTargets.length, 1)) * 16)),
+        found: rawBusinesses.length,
+        audited: reports.length,
+        totalAudit: auditTargets.length,
+        currentBusiness: business.name
+      });
     }
   }
 
@@ -1061,14 +1367,27 @@ function clampNumber(value, min, max, fallback) {
   return Math.min(max, Math.max(min, Math.round(number)));
 }
 
-async function fetchWithTimeout(url, options = {}, timeoutMs = 12000) {
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), timeoutMs);
-  try {
-    return await fetch(url, { ...options, signal: controller.signal });
-  } finally {
-    clearTimeout(timeout);
+async function fetchWithTimeout(url, options = {}, timeoutMs = 12000, retries = 1) {
+  let lastError = null;
+  for (let attempt = 0; attempt <= retries; attempt += 1) {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+      return await fetch(url, { ...options, signal: controller.signal });
+    } catch (error) {
+      lastError = error;
+      const transient = error?.name !== "AbortError" && /fetch failed|network|socket|econn/i.test(error?.message || "");
+      if (!transient || attempt === retries) throw error;
+      await delay(550 * (attempt + 1));
+    } finally {
+      clearTimeout(timeout);
+    }
   }
+  throw lastError || new Error("fetch failed");
+}
+
+function delay(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 const WORLD_LOCATIONS = [
