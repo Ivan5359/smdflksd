@@ -4,11 +4,19 @@ import { APP_VERSION } from "../src/lib/auditEngine.js";
 
 const distDir = path.join(process.cwd(), "dist");
 const indexPath = path.join(distDir, "index.html");
+const markerPath = path.join(process.cwd(), "DEPLOYMENT_MARKER.txt");
+const expectedDeployMarker = `GITHUB_ROOT_UPLOAD_${APP_VERSION}`;
 const expectedMarkers = [
   APP_VERSION,
   "Глобальный поиск",
   "Найти бизнесы",
-  "Найденные бизнесы автопилотом"
+  "Найденные бизнесы автопилотом",
+  "Сохраненные лиды",
+  "CSV лиды",
+  "USA money",
+  "Money Machine",
+  "Запустить money machine",
+  "Горячие лиды"
 ];
 
 const indexHtml = await fs.readFile(indexPath, "utf8");
@@ -27,4 +35,10 @@ if (missing.length) {
   throw new Error(`Build is stale. Missing frontend markers: ${missing.join(", ")}`);
 }
 
+const deployMarker = await fs.readFile(markerPath, "utf8");
+if (!deployMarker.includes(expectedDeployMarker)) {
+  throw new Error(`Deployment marker is missing or stale. Expected ${expectedDeployMarker}`);
+}
+
 console.log("Frontend build markers verified:", expectedMarkers.join(", "));
+console.log("Deployment marker verified:", expectedDeployMarker);

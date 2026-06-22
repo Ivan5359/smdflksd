@@ -79,6 +79,42 @@ const defaultDiscoveryLocations = [
   "Dubai, UAE"
 ].join("\n");
 
+const nichePresets = [
+  { label: "Dentist", niche: "dentist", averageSale: 500, monthlyVisitors: 700 },
+  { label: "Clinic", niche: "clinic", averageSale: 650, monthlyVisitors: 900 },
+  { label: "Lawyer", niche: "law firm", averageSale: 1200, monthlyVisitors: 600 },
+  { label: "HVAC", niche: "hvac", averageSale: 780, monthlyVisitors: 850 },
+  { label: "Hotel", niche: "hotel", averageSale: 240, monthlyVisitors: 1600 },
+  { label: "Salon", niche: "salon", averageSale: 140, monthlyVisitors: 900 }
+];
+
+const locationPresets = [
+  {
+    label: "USA money",
+    worldwide: false,
+    city: "Austin",
+    locations: ["Austin, USA", "Miami, USA", "Chicago, USA", "Los Angeles, USA", "New York, USA"]
+  },
+  {
+    label: "EU cities",
+    worldwide: false,
+    city: "Madrid",
+    locations: ["Madrid, Spain", "Barcelona, Spain", "Paris, France", "Berlin, Germany", "Amsterdam, Netherlands"]
+  },
+  {
+    label: "Gulf",
+    worldwide: false,
+    city: "Dubai",
+    locations: ["Dubai, UAE", "Doha, Qatar", "Riyadh, Saudi Arabia", "Abu Dhabi, UAE"]
+  },
+  {
+    label: "World scan",
+    worldwide: true,
+    city: "Austin",
+    locations: ["New York, USA", "London, United Kingdom", "Toronto, Canada", "Dubai, UAE", "Singapore"]
+  }
+];
+
 const messageTabs = [
   { id: "email", label: "Email" },
   { id: "followUp", label: "Follow-up" },
@@ -92,6 +128,7 @@ function App() {
   const [report, setReport] = useState(demoReport);
   const [history, setHistory] = useState(() => readLocal("sitemoney.history", []));
   const [crm, setCrm] = useState(() => readLocal("sitemoney.crm", []));
+  const [savedLeads, setSavedLeads] = useState(() => readLocal("sitemoney.savedLeads", []));
   const [bulkResults, setBulkResults] = useState([]);
   const [discoveredBusinesses, setDiscoveredBusinesses] = useState([]);
   const [discoveryLocations, setDiscoveryLocations] = useState(defaultDiscoveryLocations);
@@ -103,10 +140,27 @@ function App() {
     radiusKm: 14,
     requireWebsite: false
   });
+  const [moneySettings, setMoneySettings] = useState({
+    maxLeads: 30,
+    minMoneyScore: 45,
+    monthlyRetainer: 180,
+    closeRate: 12
+  });
+  const [moneyMachine, setMoneyMachine] = useState(() =>
+    readLocal("sitemoney.moneyMachine", { leads: [], pipeline: null, totals: null, searchedLocations: [] })
+  );
+  const [leadFilter, setLeadFilter] = useState({
+    query: "",
+    onlyWebsite: false,
+    onlySaved: false,
+    minScore: 0,
+    sort: "money"
+  });
   const [messageTab, setMessageTab] = useState("email");
   const [loading, setLoading] = useState(false);
   const [queueLoading, setQueueLoading] = useState(false);
   const [discoverLoading, setDiscoverLoading] = useState(false);
+  const [moneyLoading, setMoneyLoading] = useState(false);
   const [error, setError] = useState("");
   const [copied, setCopied] = useState("");
   const [serverVersion, setServerVersion] = useState(APP_VERSION);
@@ -147,12 +201,81 @@ function App() {
     [discoveredBusinesses]
   );
 
+  const savedLeadIds = useMemo(() => new Set(savedLeads.map((lead) => lead.id)), [savedLeads]);
+
+  const filteredDiscovery = useMemo(() => {
+    const query = leadFilter.query.trim().toLowerCase();
+    const filtered = rankedDiscovery.filter((business) => {
+      const haystack = `${business.name || ""} ${business.city || ""} ${business.country || ""} ${business.website || ""} ${business.topPriority || ""}`.toLowerCase();
+      if (query && !haystack.includes(query)) return false;
+      if (leadFilter.onlyWebsite && !business.website) return false;
+      if (leadFilter.onlySaved && !savedLeadIds.has(business.id)) return false;
+      if ((business.score || 0) < Number(leadFilter.minScore || 0)) return false;
+      return true;
+    });
+
+    return filtered.sort((a, b) => {
+      if (leadFilter.sort === "score") return (b.score || 0) - (a.score || 0);
+      if (leadFilter.sort === "name") return String(a.name || "").localeCompare(String(b.name || ""));
+      return (b.moneyOpportunity || 0) - (a.moneyOpportunity || 0) || (b.score || 0) - (a.score || 0);
+    });
+  }, [leadFilter, rankedDiscovery, savedLeadIds]);
+
+  const pipelineStats = useMemo(() => {
+    const leads = rankedDiscovery.length ? rankedDiscovery : savedLeads;
+    const total = leads.length;
+    const withWebsite = leads.filter((lead) => lead.website).length;
+    const highScore = leads.filter((lead) => (lead.score || 0) >= 75).length;
+    return [
+      { label: "Найдено", value: total },
+      { label: "С сайтами", value: withWebsite },
+      { label: "Сохранено", value: savedLeads.length },
+      { label: "CRM", value: crm.length },
+      { label: "75+", value: highScore }
+    ];
+  }, [crm.length, rankedDiscovery, savedLeads]);
+
+  const moneyLeads = moneyMachine.leads || [];
+  const moneyPipeline = moneyMachine.pipeline || {};
+  const hotMoneyLeads = moneyLeads.filter((lead) => lead.priority === "hot").length;
+
   function updateForm(key, value) {
     setForm((current) => ({ ...current, [key]: value }));
   }
 
   function updateDiscovery(key, value) {
     setDiscoverySettings((current) => ({ ...current, [key]: value }));
+  }
+
+  function updateLeadFilter(key, value) {
+    setLeadFilter((current) => ({ ...current, [key]: value }));
+  }
+
+  function updateMoneySettings(key, value) {
+    setMoneySettings((current) => ({ ...current, [key]: value }));
+  }
+
+  function applyNichePreset(preset) {
+    setForm((current) => ({
+      ...current,
+      niche: preset.niche,
+      averageSale: preset.averageSale,
+      monthlyVisitors: preset.monthlyVisitors,
+      mode: "agent",
+      autopilot: true,
+      createCrmTasks: true
+    }));
+  }
+
+  function applyLocationPreset(preset) {
+    setForm((current) => ({ ...current, city: preset.city }));
+    setDiscoveryLocations(preset.locations.join("\n"));
+    setDiscoverySettings((current) => ({
+      ...current,
+      worldwide: preset.worldwide,
+      locationLimit: Math.min(8, preset.locations.length),
+      radiusKm: preset.worldwide ? 14 : 12
+    }));
   }
 
   async function runAudit(event, override = {}) {
@@ -241,12 +364,70 @@ function App() {
         writeLocal("sitemoney.crm", next);
       }
 
+      const savable = (data.businesses || []).slice(0, 8);
+      if (savable.length) {
+        const nextSaved = mergeLeads(savable, savedLeads);
+        setSavedLeads(nextSaved);
+        writeLocal("sitemoney.savedLeads", nextSaved);
+      }
+
       setCopied("discovery");
       window.setTimeout(() => setCopied(""), 1600);
     } catch (discoverError) {
       setError(discoverError.message || "Не удалось найти бизнесы.");
     } finally {
       setDiscoverLoading(false);
+    }
+  }
+
+  async function runMoneyMachine() {
+    setMoneyLoading(true);
+    setError("");
+    setCopied("");
+
+    try {
+      const response = await fetch("/api/lead-machine", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          ...form,
+          ...discoverySettings,
+          ...moneySettings,
+          locations: discoveryLocations,
+          auditFound: true
+        })
+      });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error || "Money machine failed");
+
+      setMoneyMachine(data);
+      writeLocal("sitemoney.moneyMachine", data);
+      setDiscoveredBusinesses(data.leads || []);
+
+      const reportItems = (data.reports || []).map((item) => ({ ok: true, report: item }));
+      setBulkResults(reportItems);
+      const firstReport = data.reports?.[0];
+      if (firstReport) acceptReport(firstReport, true);
+
+      if (form.createCrmTasks && data.leads?.length) {
+        const newTasks = data.leads.slice(0, 12).map((item) => crmFromBusiness(item));
+        const next = mergeCrm(newTasks, crm);
+        setCrm(next);
+        writeLocal("sitemoney.crm", next);
+      }
+
+      if (data.leads?.length) {
+        const nextSaved = mergeLeads(data.leads.slice(0, 12), savedLeads);
+        setSavedLeads(nextSaved);
+        writeLocal("sitemoney.savedLeads", nextSaved);
+      }
+
+      setCopied("money-machine");
+      window.setTimeout(() => setCopied(""), 1600);
+    } catch (machineError) {
+      setError(machineError.message || "Не удалось запустить money machine.");
+    } finally {
+      setMoneyLoading(false);
     }
   }
 
@@ -291,6 +472,116 @@ function App() {
     writeLocal("sitemoney.crm", next);
     setCopied("crm");
     window.setTimeout(() => setCopied(""), 1400);
+  }
+
+  function saveBusinessLead(business) {
+    const next = mergeLeads([business], savedLeads);
+    setSavedLeads(next);
+    writeLocal("sitemoney.savedLeads", next);
+    setCopied(`save-${business.id}`);
+    window.setTimeout(() => setCopied(""), 1400);
+  }
+
+  function removeSavedLead(id) {
+    const next = savedLeads.filter((lead) => lead.id !== id);
+    setSavedLeads(next);
+    writeLocal("sitemoney.savedLeads", next);
+  }
+
+  function addBusinessToCrm(business) {
+    const task = crmFromBusiness(business);
+    const next = mergeCrm([task], crm);
+    setCrm(next);
+    writeLocal("sitemoney.crm", next);
+    setCopied(`crm-${business.id}`);
+    window.setTimeout(() => setCopied(""), 1400);
+  }
+
+  function addFilteredWebsitesToQueue() {
+    const websites = filteredDiscovery.map((lead) => lead.website).filter(Boolean);
+    if (!websites.length) return;
+    setQueueText((current) => mergeLines(current, websites).join("\n"));
+    setCopied("queue");
+    window.setTimeout(() => setCopied(""), 1400);
+  }
+
+  function downloadLeadsCsv() {
+    const source = filteredDiscovery.length ? filteredDiscovery : savedLeads;
+    const rows = [
+      ["name", "city", "country", "website", "phone", "email", "score", "money_score", "priority", "offer", "deal_value", "money_opportunity", "top_priority", "pitch", "map"],
+      ...source.map((lead) => [
+        lead.name,
+        lead.city,
+        lead.country,
+        lead.website,
+        lead.phone,
+        lead.email,
+        lead.score,
+        lead.moneyScore,
+        lead.priority,
+        lead.serviceOffer?.name,
+        lead.estimatedDealValue,
+        lead.moneyOpportunity,
+        lead.topPriority,
+        lead.pitch,
+        lead.osmUrl || lead.mapUrl
+      ])
+    ];
+    downloadBlob(new Blob([toCsv(rows)], { type: "text/csv;charset=utf-8" }), "sitemoney-leads.csv");
+  }
+
+  function downloadMoneyCsv() {
+    const rows = [
+      ["rank", "name", "city", "country", "contact_route", "website", "phone", "email", "money_score", "priority", "opportunity", "offer", "price", "monthly", "client_opportunity", "recommended_action", "pitch"],
+      ...moneyLeads.map((lead) => [
+        lead.rank,
+        lead.name,
+        lead.city,
+        lead.country,
+        lead.contactRoute,
+        lead.website,
+        lead.phone,
+        lead.email,
+        lead.moneyScore,
+        lead.priority,
+        lead.opportunity,
+        lead.serviceOffer?.name,
+        lead.serviceOffer?.price,
+        lead.serviceOffer?.monthly,
+        lead.clientOpportunity,
+        lead.recommendedAction,
+        lead.pitch
+      ])
+    ];
+    downloadBlob(new Blob([toCsv(rows)], { type: "text/csv;charset=utf-8" }), "sitemoney-money-machine.csv");
+  }
+
+  function downloadCrmCsv() {
+    const rows = [
+      ["host", "status", "value", "next_action", "follow_up_hours", "tags"],
+      ...crm.map((item) => [item.host, item.status, item.value, item.nextAction, item.followUpInHours, (item.tags || []).join("; ")])
+    ];
+    downloadBlob(new Blob([toCsv(rows)], { type: "text/csv;charset=utf-8" }), "sitemoney-crm.csv");
+  }
+
+  async function copyLeadBrief(business) {
+    if (business.pitch) {
+      await copyText(`lead-${business.id}`, business.pitch);
+      return;
+    }
+    const text = [
+      `${business.name}`,
+      [business.city, business.country].filter(Boolean).join(", "),
+      business.website ? `Site: ${business.website}` : "Site: not found",
+      business.phone ? `Phone: ${business.phone}` : "",
+      business.email ? `Email: ${business.email}` : "",
+      `Score: ${business.score || 0}`,
+      business.moneyOpportunity ? `Potential: ${money(business.moneyOpportunity)}/mo` : "",
+      `Hook: ${business.topPriority || "Нужен аудит"}`
+    ]
+      .filter(Boolean)
+      .join("\n");
+    await copyText(`lead-${business.id}`, text);
   }
 
   function updateCrmStatus(id, status) {
@@ -346,8 +637,8 @@ function App() {
 
   const activeMessage = report.outreach[messageTab] || report.outreach.email;
   const topPriority = report.priorities[0];
-  const radarTargets = rankedDiscovery.length
-    ? rankedDiscovery.slice(0, 6)
+  const radarTargets = filteredDiscovery.length
+    ? filteredDiscovery.slice(0, 6)
     : sortedBulk.slice(0, 6).map((item) => ({
         id: item.id,
         name: item.businessName || item.host,
@@ -387,6 +678,7 @@ function App() {
         </div>
         <nav className="command-tabs" aria-label="Рабочие зоны">
           <a href="#automation">Автопилот</a>
+          <a href="#money-machine">Money Machine</a>
           <a href="#radar">Радар целей</a>
           <a href="#deal">Сделка</a>
           <a href="#export">Экспорт</a>
@@ -399,6 +691,10 @@ function App() {
           <button className="primary-button" onClick={runDiscovery} disabled={discoverLoading}>
             {discoverLoading ? <Loader2 className="spin" size={16} /> : <Radar size={16} />}
             Найти бизнесы
+          </button>
+          <button className="primary-button" onClick={runMoneyMachine} disabled={moneyLoading}>
+            {moneyLoading ? <Loader2 className="spin" size={16} /> : <BadgeDollarSign size={16} />}
+            Money Machine
           </button>
         </div>
       </header>
@@ -456,6 +752,14 @@ function App() {
                 </label>
               </div>
 
+              <div className="preset-bank">
+                {nichePresets.map((preset) => (
+                  <button type="button" key={preset.label} onClick={() => applyNichePreset(preset)}>
+                    {preset.label}
+                  </button>
+                ))}
+              </div>
+
               <div className="segmented">
                 {["fast", "deep", "agent"].map((mode) => (
                   <button
@@ -501,6 +805,13 @@ function App() {
                 <strong>{discoverySettings.worldwide ? "WORLD" : "CUSTOM"}</strong>
               </div>
               <Bot size={16} />
+            </div>
+            <div className="preset-bank geo-bank">
+              {locationPresets.map((preset) => (
+                <button type="button" key={preset.label} onClick={() => applyLocationPreset(preset)}>
+                  {preset.label}
+                </button>
+              ))}
             </div>
             <div className="toggle-grid compact">
               <Toggle
@@ -569,6 +880,63 @@ function App() {
             <button className="primary-button wide" onClick={runDiscovery} disabled={discoverLoading}>
               {discoverLoading ? <Loader2 className="spin" size={16} /> : <Radar size={16} />}
               Найти бизнесы
+            </button>
+          </section>
+
+          <section className="control-slab money-control">
+            <div className="panel-head">
+              <div>
+                <span>Money Machine</span>
+                <strong>{hotMoneyLeads} hot</strong>
+              </div>
+              <BadgeDollarSign size={16} />
+            </div>
+            <div className="split-fields discovery-numbers">
+              <label>
+                Лидов
+                <input
+                  type="number"
+                  min="5"
+                  max="80"
+                  value={moneySettings.maxLeads}
+                  onChange={(event) => updateMoneySettings("maxLeads", event.target.value)}
+                />
+              </label>
+              <label>
+                Min score
+                <input
+                  type="number"
+                  min="0"
+                  max="100"
+                  value={moneySettings.minMoneyScore}
+                  onChange={(event) => updateMoneySettings("minMoneyScore", event.target.value)}
+                />
+              </label>
+            </div>
+            <div className="split-fields discovery-numbers">
+              <label>
+                Retainer
+                <input
+                  type="number"
+                  min="0"
+                  value={moneySettings.monthlyRetainer}
+                  onChange={(event) => updateMoneySettings("monthlyRetainer", event.target.value)}
+                />
+              </label>
+              <label>
+                Close %
+                <input
+                  type="number"
+                  min="1"
+                  max="100"
+                  value={moneySettings.closeRate}
+                  onChange={(event) => updateMoneySettings("closeRate", event.target.value)}
+                />
+              </label>
+            </div>
+            <button className="primary-button wide" onClick={runMoneyMachine} disabled={moneyLoading}>
+              {moneyLoading ? <Loader2 className="spin" size={16} /> : <BadgeDollarSign size={16} />}
+              Запустить money machine
             </button>
           </section>
 
@@ -657,10 +1025,147 @@ function App() {
             </div>
           </div>
 
+          <section className="pipeline-strip" aria-label="Воронка лидов">
+            {pipelineStats.map((item) => (
+              <div key={item.label}>
+                <strong>{item.value}</strong>
+                <span>{item.label}</span>
+              </div>
+            ))}
+          </section>
+
+          <section className="money-machine-panel" id="money-machine">
+            <div className="stream-head">
+              <SectionTitle icon={<BadgeDollarSign size={18} />} title="Money Machine" inline />
+              <div className="stream-actions">
+                <button className="secondary-button" onClick={runMoneyMachine} disabled={moneyLoading}>
+                  {moneyLoading ? <Loader2 className="spin" size={15} /> : <Play size={15} />}
+                  Запуск
+                </button>
+                <button className="secondary-button" onClick={downloadMoneyCsv} disabled={!moneyLeads.length}>
+                  <Download size={15} />
+                  CSV money
+                </button>
+              </div>
+            </div>
+
+            <div className="money-summary-grid">
+              <MetricBlock
+                icon={<Target size={18} />}
+                label="Горячие лиды"
+                value={moneyPipeline.hot || 0}
+                note={`${moneyPipeline.warm || 0} warm`}
+              />
+              <MetricBlock
+                icon={<BadgeDollarSign size={18} />}
+                label="Пайплайн услуг"
+                value={money(moneyPipeline.oneTimeValue || 0)}
+                note={`${money(moneyPipeline.monthlyValue || 0)}/мес retainer`}
+              />
+              <MetricBlock
+                icon={<TrendingUp size={18} />}
+                label="Утечка клиентов"
+                value={money(moneyPipeline.clientOpportunity || 0)}
+                note="оценка для разговора"
+              />
+              <MetricBlock
+                icon={<Zap size={18} />}
+                label="Next best action"
+                value={moneyPipeline.topOffer || "Пусто"}
+                note={moneyPipeline.nextBestAction || "Запусти поиск"}
+              />
+            </div>
+
+            <div className="money-lead-grid">
+              {moneyLeads.slice(0, 8).map((lead) => (
+                <article key={lead.id} className={`money-lead-card ${lead.priority || ""}`}>
+                  <div className="money-card-top">
+                    <div className="money-score">
+                      <strong>{lead.moneyScore || 0}</strong>
+                      <span>{lead.priority || "lead"}</span>
+                    </div>
+                    <div>
+                      <h3>{lead.name}</h3>
+                      <p>{[lead.city, lead.country].filter(Boolean).join(", ") || lead.contactRoute}</p>
+                    </div>
+                  </div>
+                  <div className="money-card-meta">
+                    <span>{lead.opportunity}</span>
+                    <b>{lead.serviceOffer?.name || "Offer"}</b>
+                    <strong>{money(lead.estimatedDealValue || 0)}</strong>
+                  </div>
+                  <p className="pitch-preview">{lead.pitch}</p>
+                  <div className="money-evidence">
+                    {(lead.evidence || []).slice(0, 3).map((item) => (
+                      <span key={item}>{item}</span>
+                    ))}
+                  </div>
+                  <div className="lead-actions money-actions">
+                    <button type="button" onClick={() => saveBusinessLead(lead)}>
+                      {savedLeadIds.has(lead.id) ? "✓" : "Сохр"}
+                    </button>
+                    <button type="button" onClick={() => addBusinessToCrm(lead)}>
+                      CRM
+                    </button>
+                    <button type="button" onClick={() => copyLeadBrief(lead)}>
+                      Питч
+                    </button>
+                    <a href={lead.website || lead.osmUrl || lead.mapUrl} target="_blank" rel="noreferrer">
+                      Открыть
+                    </a>
+                  </div>
+                </article>
+              ))}
+              {!moneyLeads.length ? (
+                <p className="empty-state">Money Machine еще не запускалась. Выбери нишу, гео и нажми запуск.</p>
+              ) : null}
+            </div>
+          </section>
+
           <section className="target-stream">
-            <SectionTitle icon={<Bot size={18} />} title="Найденные бизнесы автопилотом" inline />
+            <div className="stream-head">
+              <SectionTitle icon={<Bot size={18} />} title="Найденные бизнесы автопилотом" inline />
+              <div className="stream-actions">
+                <button className="secondary-button" onClick={addFilteredWebsitesToQueue} disabled={!filteredDiscovery.some((lead) => lead.website)}>
+                  <Plus size={15} />
+                  В очередь
+                </button>
+                <button className="secondary-button" onClick={downloadLeadsCsv} disabled={!filteredDiscovery.length && !savedLeads.length}>
+                  <Download size={15} />
+                  CSV лиды
+                </button>
+              </div>
+            </div>
+            <div className="lead-toolbar">
+              <input
+                value={leadFilter.query}
+                onChange={(event) => updateLeadFilter("query", event.target.value)}
+                placeholder="Фильтр по имени, городу, сайту"
+              />
+              <select value={leadFilter.sort} onChange={(event) => updateLeadFilter("sort", event.target.value)}>
+                <option value="money">По деньгам</option>
+                <option value="score">По score</option>
+                <option value="name">По имени</option>
+              </select>
+              <select value={leadFilter.minScore} onChange={(event) => updateLeadFilter("minScore", event.target.value)}>
+                <option value="0">Все score</option>
+                <option value="60">60+</option>
+                <option value="75">75+</option>
+                <option value="90">90+</option>
+              </select>
+              <Toggle
+                label="С сайтом"
+                checked={leadFilter.onlyWebsite}
+                onChange={(value) => updateLeadFilter("onlyWebsite", value)}
+              />
+              <Toggle
+                label="Сохраненные"
+                checked={leadFilter.onlySaved}
+                onChange={(value) => updateLeadFilter("onlySaved", value)}
+              />
+            </div>
             <div className="stream-list">
-              {radarFeed.slice(0, 8).map((business) => (
+              {filteredDiscovery.slice(0, 10).map((business) => (
                 <article key={business.id}>
                   <div className="stream-score">{business.score || 0}</div>
                   <div>
@@ -680,8 +1185,26 @@ function App() {
                       карта
                     </a>
                   )}
+                  <div className="lead-actions">
+                    <button
+                      type="button"
+                      onClick={() => saveBusinessLead(business)}
+                      aria-label={savedLeadIds.has(business.id) ? "Лид сохранен" : "Сохранить лид"}
+                    >
+                      {savedLeadIds.has(business.id) ? "✓" : "Сохр"}
+                    </button>
+                    <button type="button" onClick={() => addBusinessToCrm(business)}>
+                      CRM
+                    </button>
+                    <button type="button" onClick={() => copyLeadBrief(business)}>
+                      Копия
+                    </button>
+                  </div>
                 </article>
               ))}
+              {!filteredDiscovery.length ? (
+                <p className="empty-state">Пока нет лидов под фильтр. Запусти поиск или снизь ограничения.</p>
+              ) : null}
             </div>
           </section>
 
@@ -819,10 +1342,46 @@ function App() {
               <Download size={16} />
               CSV для CRM
             </button>
+            <button className="secondary-button" onClick={downloadLeadsCsv}>
+              <Download size={16} />
+              CSV лиды
+            </button>
+            <button className="secondary-button" onClick={downloadMoneyCsv} disabled={!moneyLeads.length}>
+              <Download size={16} />
+              CSV money machine
+            </button>
+            <button className="secondary-button" onClick={downloadCrmCsv}>
+              <Download size={16} />
+              CRM pipeline
+            </button>
             <button className="secondary-button" onClick={() => window.print()}>
               <Printer size={16} />
               Печать/PDF
             </button>
+          </section>
+
+          <section className="drawer-section saved-panel">
+            <div className="panel-head">
+              <div>
+                <span>Сохраненные лиды</span>
+                <strong>{savedLeads.length}</strong>
+              </div>
+              <ShieldCheck size={16} />
+            </div>
+            <div className="saved-list">
+              {savedLeads.slice(0, 6).map((lead) => (
+                <article key={lead.id}>
+                  <div>
+                    <strong>{lead.name}</strong>
+                    <span>{[lead.city, lead.country].filter(Boolean).join(", ") || lead.website}</span>
+                  </div>
+                  <button type="button" onClick={() => removeSavedLead(lead.id)} aria-label="Удалить сохраненный лид">
+                    <Trash2 size={14} />
+                  </button>
+                </article>
+              ))}
+              {!savedLeads.length ? <p className="empty-state">Лучшие найденные бизнесы будут сохраняться здесь.</p> : null}
+            </div>
           </section>
 
           <section className="drawer-section next-actions">
@@ -920,8 +1479,78 @@ function crmFromReport(report) {
   };
 }
 
+function crmFromBusiness(business) {
+  return {
+    id: `lead-${business.id}`,
+    host: business.website ? safeHost(business.website) : business.name,
+    status: "Новый",
+    value: business.estimatedDealValue || business.moneyOpportunity || 0,
+    nextAction:
+      business.recommendedAction ||
+      (business.website
+        ? `Открыть аудит и написать про: ${business.topPriority || "быстрый рост заявок"}`
+        : "Найти сайт или написать через телефон/карту"),
+    followUpInHours: 48,
+    tags: [
+      business.niche || "lead",
+      business.city || "",
+      business.priority || "",
+      business.serviceOffer?.name || "",
+      business.website ? "has-site" : "no-site"
+    ].filter(Boolean),
+    pitch: business.pitch || ""
+  };
+}
+
 function mergeCrm(incoming, current) {
   return [...incoming, ...current.filter((item) => !incoming.some((next) => next.id === item.id))].slice(0, 30);
+}
+
+function mergeLeads(incoming, current) {
+  const normalized = incoming.map(normalizeLead).filter((lead) => lead.id && lead.name);
+  return [...normalized, ...current.filter((lead) => !normalized.some((next) => next.id === lead.id))].slice(0, 80);
+}
+
+function normalizeLead(lead) {
+  return {
+    id: lead.id || `${lead.name}-${lead.website || lead.osmUrl || Date.now()}`,
+    name: lead.name || "Unknown business",
+    city: lead.city || "",
+    country: lead.country || "",
+    website: lead.website || "",
+    phone: lead.phone || "",
+    email: lead.email || "",
+    osmUrl: lead.osmUrl || lead.mapUrl || "",
+    mapUrl: lead.mapUrl || lead.osmUrl || "",
+    niche: lead.niche || "",
+    score: Number(lead.score || lead.automationScore || 0),
+    moneyScore: Number(lead.moneyScore || 0),
+    priority: lead.priority || "",
+    contactRoute: lead.contactRoute || "",
+    moneyOpportunity: Number(lead.moneyOpportunity || 0),
+    clientOpportunity: Number(lead.clientOpportunity || 0),
+    estimatedDealValue: Number(lead.estimatedDealValue || 0),
+    recurringValue: Number(lead.recurringValue || 0),
+    serviceOffer: lead.serviceOffer || null,
+    recommendedAction: lead.recommendedAction || "",
+    pitch: lead.pitch || "",
+    evidence: lead.evidence || [],
+    topPriority: lead.topPriority || lead.suggestedAction || "Ждет аудита",
+    savedAt: lead.savedAt || new Date().toISOString()
+  };
+}
+
+function mergeLines(current, additions) {
+  const seen = new Set();
+  return [...String(current || "").split(/\r?\n/), ...additions]
+    .map((item) => String(item || "").trim())
+    .filter(Boolean)
+    .filter((item) => {
+      const key = item.toLowerCase();
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
 }
 
 function readLocal(key, fallback) {

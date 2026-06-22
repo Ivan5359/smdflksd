@@ -11,6 +11,7 @@
     "dev": "vite --host 127.0.0.1",
     "api": "node app-server.mjs",
     "build": "vite build && node scripts/verify-build.mjs",
+    "check:live": "node scripts/check-live.mjs",
     "start": "node app-server.mjs",
     "smoke": "node scripts/smoke-test.mjs"
   },

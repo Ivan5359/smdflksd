@@ -17,6 +17,25 @@ const PORT = Number(process.env.PORT || 8787);
 const DATA_DIR = path.join(__dirname, "data");
 const REPORTS_PATH = path.join(DATA_DIR, "reports.json");
 const DIST_DIR = path.join(__dirname, "dist");
+const DEPLOY_MARKER = `GITHUB_ROOT_UPLOAD_${APP_VERSION}`;
+const DEPLOY_MARKER_PATH = path.join(__dirname, "DEPLOYMENT_MARKER.txt");
+const OVERPASS_ENDPOINTS = [
+  "https://overpass-api.de/api/interpreter",
+  "https://overpass.kumi.systems/api/interpreter",
+  "https://overpass.openstreetmap.ru/api/interpreter"
+];
+const REQUIRED_ROOT_ITEMS = [
+  "package.json",
+  "app-server.mjs",
+  "server.js",
+  "dist",
+  "src",
+  "scripts",
+  "public",
+  "railway.json",
+  "nixpacks.toml",
+  "pnpm-lock.yaml"
+];
 
 const app = express();
 app.use(express.json({ limit: "1mb" }));
@@ -36,6 +55,26 @@ app.get("/__version", (_request, response) => {
 app.get("/__frontend-check", async (_request, response) => {
   const check = await inspectFrontendBuild();
   response.status(check.ok ? 200 : 500).json(check);
+});
+
+app.get("/__deploy-check", async (_request, response) => {
+  const frontend = await inspectFrontendBuild();
+  const required = await inspectRequiredRootItems();
+  const markerText = await readOptionalText(DEPLOY_MARKER_PATH);
+  const markerFileOk = markerText.includes(DEPLOY_MARKER);
+  const ok = frontend.ok && markerFileOk && required.every((item) => item.exists);
+
+  response.status(ok ? 200 : 500).json({
+    ok,
+    version: APP_VERSION,
+    markerExpected: DEPLOY_MARKER,
+    markerFileOk,
+    requiredRootItems: required,
+    frontend,
+    startCommand: "node app-server.mjs",
+    rootDirectory:
+      "empty if these files are in the GitHub root; RAILWAY_UPLOAD_READY only if that folder itself is inside the repo"
+  });
 });
 
 app.get("/api/templates", (_request, response) => {
@@ -90,57 +129,61 @@ app.post("/api/bulk-audit", async (request, response) => {
 app.post("/api/discover", async (request, response) => {
   try {
     const payload = normalizeDiscoveryPayload(request.body || {});
-    const locations = payload.worldwide
-      ? WORLD_LOCATIONS.slice(0, payload.locationLimit)
-      : await resolveLocations(payload);
-    const rawBusinesses = [];
-    const seen = new Set();
-
-    for (const location of locations) {
-      const businesses = await searchBusinesses(location, payload);
-      for (const business of businesses) {
-        const key = business.website || `${business.name}-${business.lat}-${business.lon}`;
-        if (seen.has(key)) continue;
-        seen.add(key);
-        rawBusinesses.push(business);
-        if (rawBusinesses.length >= payload.limit) break;
-      }
-      if (rawBusinesses.length >= payload.limit) break;
-    }
-
-    const reports = [];
-    if (payload.auditFound) {
-      for (const business of rawBusinesses.filter((item) => item.website).slice(0, payload.auditLimit)) {
-        const report = await auditSingle({
-          ...request.body,
-          url: business.website,
-          niche: payload.niche,
-          city: business.city || payload.city,
-          averageSale: payload.averageSale,
-          monthlyVisitors: payload.monthlyVisitors,
-          mode: "agent",
-          autopilot: true,
-          createCrmTasks: true
-        });
-        report.discoveredBusiness = business;
-        await rememberReport(report);
-        reports.push(report);
-      }
-    }
+    const discovery = await runBusinessDiscovery(payload, request.body || {});
 
     response.json({
       version: APP_VERSION,
       source: "openstreetmap-overpass",
       query: payload,
-      searchedLocations: locations.map((item) => item.label),
-      total: rawBusinesses.length,
-      withWebsite: rawBusinesses.filter((item) => item.website).length,
-      withoutWebsite: rawBusinesses.filter((item) => !item.website).length,
-      businesses: rankBusinesses(rawBusinesses, reports),
-      reports
+      searchedLocations: discovery.locations.map((item) => item.label),
+      warnings: discovery.warnings,
+      total: discovery.rawBusinesses.length,
+      withWebsite: discovery.rawBusinesses.filter((item) => item.website).length,
+      withoutWebsite: discovery.rawBusinesses.filter((item) => !item.website).length,
+      businesses: discovery.businesses,
+      reports: discovery.reports
     });
   } catch (error) {
     response.status(400).json({ error: error.message || "Discovery failed" });
+  }
+});
+
+app.post("/api/lead-machine", async (request, response) => {
+  try {
+    const payload = normalizeDiscoveryPayload({
+      ...request.body,
+      auditFound: request.body?.auditFound !== false,
+      limit: request.body?.limit || 45,
+      auditLimit: request.body?.auditLimit || 10,
+      locationLimit: request.body?.locationLimit || 8
+    });
+    const machine = normalizeLeadMachinePayload(request.body || {});
+    const discovery = await runBusinessDiscovery(payload, request.body || {});
+    const leads = buildMoneyMachineLeads(discovery.businesses, discovery.reports, payload, machine)
+      .filter((lead) => lead.moneyScore >= machine.minMoneyScore)
+      .slice(0, machine.maxLeads);
+    const pipeline = summarizeMoneyPipeline(leads);
+
+    response.json({
+      version: APP_VERSION,
+      source: "openstreetmap-overpass",
+      generatedAt: new Date().toISOString(),
+      query: { ...payload, ...machine },
+      searchedLocations: discovery.locations.map((item) => item.label),
+      warnings: discovery.warnings,
+      totals: {
+        found: discovery.rawBusinesses.length,
+        ranked: leads.length,
+        withWebsite: leads.filter((lead) => lead.website).length,
+        withoutWebsite: leads.filter((lead) => !lead.website).length,
+        audited: discovery.reports.length
+      },
+      pipeline,
+      leads,
+      reports: discovery.reports
+    });
+  } catch (error) {
+    response.status(400).json({ error: error.message || "Lead machine failed" });
   }
 });
 
@@ -240,7 +283,13 @@ async function inspectFrontendBuild() {
     version: APP_VERSION,
     globalSearch: "Глобальный поиск",
     findBusinesses: "Найти бизнесы",
-    discoveryList: "Найденные бизнесы автопилотом"
+    discoveryList: "Найденные бизнесы автопилотом",
+    savedLeads: "Сохраненные лиды",
+    leadCsv: "CSV лиды",
+    geoPreset: "USA money",
+    moneyMachine: "Money Machine",
+    runMoneyMachine: "Запустить money machine",
+    hotLeads: "Горячие лиды"
   };
 
   try {
@@ -270,6 +319,27 @@ async function inspectFrontendBuild() {
       version: APP_VERSION,
       error: error.message || "Frontend build check failed"
     };
+  }
+}
+
+async function inspectRequiredRootItems() {
+  return Promise.all(
+    REQUIRED_ROOT_ITEMS.map(async (item) => {
+      try {
+        await fs.access(path.join(__dirname, item));
+        return { item, exists: true };
+      } catch {
+        return { item, exists: false };
+      }
+    })
+  );
+}
+
+async function readOptionalText(filePath) {
+  try {
+    return await fs.readFile(filePath, "utf8");
+  } catch {
+    return "";
   }
 }
 
@@ -354,6 +424,65 @@ function normalizeQueue(value) {
     .filter(Boolean);
 }
 
+async function runBusinessDiscovery(payload, input = {}) {
+  const locations = payload.worldwide
+    ? WORLD_LOCATIONS.slice(0, payload.locationLimit)
+    : await resolveLocations(payload);
+  const rawBusinesses = [];
+  const seen = new Set();
+  const warnings = [];
+
+  for (const location of locations) {
+    let businesses = [];
+    try {
+      businesses = await searchBusinesses(location, payload);
+    } catch (error) {
+      warnings.push(`${location.label}: ${error.message || "search failed"}`);
+      continue;
+    }
+    for (const business of businesses) {
+      const key = String(business.website || `${business.name}-${business.lat}-${business.lon}`).toLowerCase();
+      if (seen.has(key)) continue;
+      seen.add(key);
+      rawBusinesses.push(business);
+      if (rawBusinesses.length >= payload.limit) break;
+    }
+    if (rawBusinesses.length >= payload.limit) break;
+  }
+
+  if (!rawBusinesses.length && warnings.length) {
+    throw new Error(`Поиск временно не дал результатов. ${warnings.slice(0, 2).join(" | ")}`);
+  }
+
+  const reports = [];
+  if (payload.auditFound) {
+    for (const business of rawBusinesses.filter((item) => item.website).slice(0, payload.auditLimit)) {
+      const report = await auditSingle({
+        ...input,
+        url: business.website,
+        niche: payload.niche,
+        city: business.city || payload.city,
+        averageSale: payload.averageSale,
+        monthlyVisitors: payload.monthlyVisitors,
+        mode: "agent",
+        autopilot: true,
+        createCrmTasks: true
+      });
+      report.discoveredBusiness = business;
+      await rememberReport(report);
+      reports.push(report);
+    }
+  }
+
+  return {
+    locations,
+    warnings,
+    rawBusinesses,
+    reports,
+    businesses: rankBusinesses(rawBusinesses, reports)
+  };
+}
+
 function normalizeDiscoveryPayload(input) {
   const limit = clampNumber(input.limit, 5, 100, 30);
   const auditLimit = clampNumber(input.auditLimit, 1, 30, Math.min(6, limit));
@@ -379,6 +508,15 @@ function normalizeDiscoveryPayload(input) {
     requireWebsite: Boolean(input.requireWebsite),
     averageSale: Number(input.averageSale || 300),
     monthlyVisitors: Number(input.monthlyVisitors || 600)
+  };
+}
+
+function normalizeLeadMachinePayload(input) {
+  return {
+    maxLeads: clampNumber(input.maxLeads || input.leadLimit, 5, 80, 30),
+    minMoneyScore: clampNumber(input.minMoneyScore, 0, 100, 45),
+    monthlyRetainer: clampNumber(input.monthlyRetainer, 0, 5000, 180),
+    closeRate: clampNumber(input.closeRate, 1, 100, 12)
   };
 }
 
@@ -426,29 +564,127 @@ async function searchBusinesses(location, payload) {
   const query = `
     [out:json][timeout:25];
     (
-      ${tagFilters
-        .map((filter) => `node${filter}(around:${payload.radiusMeters},${location.lat},${location.lon});way${filter}(around:${payload.radiusMeters},${location.lat},${location.lon});relation${filter}(around:${payload.radiusMeters},${location.lat},${location.lon});`)
-        .join("\n")}
+      ${buildOverpassStatements(tagFilters, location, payload)}
     );
     out center tags ${Math.min(payload.limit * 2, 120)};
   `;
-  const response = await fetchWithTimeout("https://overpass-api.de/api/interpreter", {
-    method: "POST",
-    headers: {
-      "content-type": "application/x-www-form-urlencoded; charset=UTF-8",
-      "user-agent": "SiteMoneyAudit/1.0 discovery"
-    },
-    body: new URLSearchParams({ data: query })
-  }, 30000);
+  let lastError = "";
+  for (const endpoint of OVERPASS_ENDPOINTS) {
+    try {
+      const response = await fetchWithTimeout(endpoint, {
+        method: "POST",
+        headers: {
+          "content-type": "application/x-www-form-urlencoded; charset=UTF-8",
+          "user-agent": "SiteMoneyAudit/1.0 discovery"
+        },
+        body: new URLSearchParams({ data: query })
+      }, 30000);
 
-  if (!response.ok) {
-    throw new Error(`OpenStreetMap search failed: ${response.status}`);
+      if (!response.ok) {
+        lastError = `${new URL(endpoint).hostname} ${response.status}`;
+        continue;
+      }
+      const data = await response.json();
+      return (data.elements || [])
+        .map((element) => normalizeOsmBusiness(element, location, payload))
+        .filter((business) => business.name && (!payload.requireWebsite || business.website))
+        .slice(0, payload.limit);
+    } catch (error) {
+      lastError = `${new URL(endpoint).hostname} ${error.message || "request failed"}`;
+    }
   }
+
+  const fallbackBusinesses = await searchBusinessesWithNominatim(location, payload);
+  if (fallbackBusinesses.length) return fallbackBusinesses;
+
+  throw new Error(`OpenStreetMap search failed after mirrors: ${lastError}`);
+}
+
+function buildOverpassStatements(tagFilters, location, payload) {
+  const elementTypes = ["node", "way"];
+  const websiteFilters = payload.requireWebsite ? ['["website"]', '["contact:website"]', '["url"]'] : [""];
+  return tagFilters
+    .flatMap((filter) =>
+      websiteFilters.flatMap((websiteFilter) =>
+        elementTypes.map(
+          (type) =>
+            `${type}${filter}${websiteFilter}(around:${payload.radiusMeters},${location.lat},${location.lon});`
+        )
+      )
+    )
+    .join("\n");
+}
+
+async function searchBusinessesWithNominatim(location, payload) {
+  const url = new URL("https://nominatim.openstreetmap.org/search");
+  url.searchParams.set("q", `${payload.niche} ${location.label}`);
+  url.searchParams.set("format", "jsonv2");
+  url.searchParams.set("limit", String(Math.min(payload.limit, 30)));
+  url.searchParams.set("addressdetails", "1");
+  url.searchParams.set("extratags", "1");
+  url.searchParams.set("namedetails", "1");
+
+  const response = await fetchWithTimeout(url, {
+    headers: {
+      "user-agent": "SiteMoneyAudit/1.0 discovery fallback"
+    }
+  }, 15000);
+  if (!response.ok) return [];
   const data = await response.json();
-  return (data.elements || [])
-    .map((element) => normalizeOsmBusiness(element, location, payload))
+  return (data || [])
+    .map((item) => normalizeNominatimBusiness(item, location, payload))
     .filter((business) => business.name && (!payload.requireWebsite || business.website))
     .slice(0, payload.limit);
+}
+
+function normalizeNominatimBusiness(item, location, payload) {
+  const extra = item.extratags || {};
+  const addressData = item.address || {};
+  const website = normalizeBusinessWebsite(extra.website || extra["contact:website"] || extra.url);
+  const phone = extra.phone || extra["contact:phone"] || "";
+  const email = extra.email || extra["contact:email"] || "";
+  const lat = Number(item.lat);
+  const lon = Number(item.lon);
+  const name =
+    item.namedetails?.name ||
+    item.namedetails?.["name:en"] ||
+    extra.name ||
+    String(item.display_name || "").split(",")[0];
+  const address = [
+    addressData.house_number,
+    addressData.road,
+    addressData.city || addressData.town || addressData.village || location.city,
+    addressData.country || location.country
+  ]
+    .filter(Boolean)
+    .join(", ");
+  const contactScore = (website ? 34 : 0) + (phone ? 18 : 0) + (email ? 10 : 0);
+  const fitScore = String(item.type || item.category || "").toLowerCase().includes(String(payload.niche).toLowerCase())
+    ? 26
+    : 14;
+
+  return {
+    id: `nominatim-${item.osm_type || "place"}-${item.osm_id || name}`,
+    source: "OpenStreetMap Nominatim",
+    name,
+    niche: payload.niche,
+    city: addressData.city || addressData.town || addressData.village || location.city,
+    country: addressData.country || location.country,
+    address,
+    website,
+    phone,
+    email,
+    lat,
+    lon,
+    mapUrl: lat && lon ? `https://www.openstreetmap.org/?mlat=${lat}&mlon=${lon}#map=17/${lat}/${lon}` : "",
+    osmUrl: item.osm_type && item.osm_id ? `https://www.openstreetmap.org/${item.osm_type}/${item.osm_id}` : "",
+    tags: compactTags({ amenity: item.type, shop: item.category, brand: extra.brand }),
+    automationScore: Math.max(10, Math.min(100, contactScore + fitScore + 18)),
+    status: website ? "ready_to_audit" : "needs_contact_research",
+    suggestedAction: website
+      ? "Авто-аудит сайта и подготовка сообщения"
+      : "Открыть карту и найти сайт/телефон вручную"
+  };
 }
 
 function normalizeOsmBusiness(element, location, payload) {
@@ -513,6 +749,245 @@ function rankBusinesses(businesses, reports) {
       if (b.moneyOpportunity !== a.moneyOpportunity) return b.moneyOpportunity - a.moneyOpportunity;
       return b.score - a.score;
     });
+}
+
+function buildMoneyMachineLeads(businesses, reports, payload, machine) {
+  const reportsById = new Map(reports.map((report) => [report.id, report]));
+  const reportsByUrl = new Map();
+  for (const report of reports) {
+    [report.input?.url, report.finalUrl].filter(Boolean).forEach((url) => reportsByUrl.set(url, report));
+  }
+
+  return businesses
+    .map((business, index) => {
+      const report =
+        reportsById.get(business.reportId) ||
+        reportsByUrl.get(business.website) ||
+        reports.find((item) => item.discoveredBusiness?.id === business.id);
+      return buildMoneyMachineLead(business, report, payload, machine, index);
+    })
+    .sort((a, b) => {
+      if (b.moneyScore !== a.moneyScore) return b.moneyScore - a.moneyScore;
+      return b.estimatedDealValue - a.estimatedDealValue;
+    });
+}
+
+function buildMoneyMachineLead(business, report, payload, machine, index) {
+  const issue = detectLeadIssue(business, report);
+  const offer = buildServiceOffer(issue, payload, machine);
+  const contactRoute = pickContactRoute(business);
+  const clientOpportunity = estimateClientOpportunity(business, report, payload, issue);
+  const estimatedDealValue = offer.price + offer.monthly * 2;
+  const moneyScore = scoreMoneyLead(business, report, payload, issue, offer);
+  const priority = moneyScore >= 78 ? "hot" : moneyScore >= 58 ? "warm" : "cold";
+  const pitch = createLeadPitch(business, report, issue, offer, clientOpportunity);
+
+  return {
+    ...business,
+    rank: index + 1,
+    moneyScore,
+    priority,
+    contactRoute,
+    opportunity: issue.title,
+    issue,
+    serviceOffer: offer,
+    estimatedDealValue,
+    recurringValue: offer.monthly,
+    clientOpportunity,
+    recommendedAction: createRecommendedAction(business, issue, contactRoute),
+    pitch,
+    nextSteps: createLeadNextSteps(business, issue, offer),
+    evidence: createLeadEvidence(business, report, issue),
+    topPriority: issue.title,
+    moneyOpportunity: clientOpportunity,
+    score: report?.score?.total || business.score || moneyScore
+  };
+}
+
+function detectLeadIssue(business, report) {
+  const facts = report?.facts || {};
+  const priority = report?.priorities?.[0];
+  if (!business.website) {
+    return {
+      key: "no_website",
+      title: "Нет сайта в открытых данных",
+      severity: "high",
+      reason: "Лид можно продавать как быстрый сайт/лендинг с заявкой и картой."
+    };
+  }
+  if (priority) {
+    return {
+      key: priority.key,
+      title: priority.title,
+      severity: priority.severity,
+      reason: priority.sellLine || priority.fix
+    };
+  }
+  if (!facts.hasPhone && !facts.hasEmail) {
+    return {
+      key: "contact",
+      title: "Нет быстрого контакта",
+      severity: "high",
+      reason: "Сайт есть, но горячий клиент не видит простой путь к заявке."
+    };
+  }
+  if (!facts.hasBooking && facts.forms === 0) {
+    return {
+      key: "booking",
+      title: "Нет формы заявки",
+      severity: "high",
+      reason: "Можно продать маленький lead-capture sprint без полного редизайна."
+    };
+  }
+  return {
+    key: "conversion",
+    title: "Можно усилить конверсию",
+    severity: "medium",
+    reason: "Есть сайт, но можно упаковать улучшение первого экрана, CTA и доверия."
+  };
+}
+
+function buildServiceOffer(issue, payload, machine) {
+  const averageSale = Number(payload.averageSale || 300);
+  const monthly = Math.max(0, Number(machine.monthlyRetainer || 0));
+  const templates = {
+    no_website: {
+      name: "Website Starter",
+      price: roundToNearest(Math.max(690, averageSale * 1.6), 10),
+      monthly,
+      scope: "1-страничный сайт, мобильная заявка, карта, телефон, базовое SEO"
+    },
+    contact: {
+      name: "Lead Capture Fix",
+      price: roundToNearest(Math.max(290, averageSale * 0.9), 10),
+      monthly: Math.round(monthly * 0.6),
+      scope: "CTA, кликабельный телефон, форма заявки, быстрый блок доверия"
+    },
+    booking: {
+      name: "Booking Sprint",
+      price: roundToNearest(Math.max(390, averageSale * 1.1), 10),
+      monthly: Math.round(monthly * 0.7),
+      scope: "Онлайн-запись или мини-форма, уведомления, tracking события"
+    },
+    proof: {
+      name: "Trust Pack",
+      price: roundToNearest(Math.max(250, averageSale * 0.7), 10),
+      monthly: Math.round(monthly * 0.5),
+      scope: "Отзывы, гарантии, фото работ, локальные доказательства"
+    },
+    local: {
+      name: "Local SEO Patch",
+      price: roundToNearest(Math.max(320, averageSale * 0.8), 10),
+      monthly,
+      scope: "Городские блоки, карта, service areas, schema и локальные CTA"
+    },
+    speed: {
+      name: "Speed & Tracking Fix",
+      price: roundToNearest(Math.max(260, averageSale * 0.6), 10),
+      monthly: Math.round(monthly * 0.45),
+      scope: "Ускорение, аналитика, события заявок и отчет до/после"
+    }
+  };
+
+  return templates[issue.key] || {
+    name: "Conversion Sprint",
+    price: roundToNearest(Math.max(350, averageSale * 0.85), 10),
+    monthly: Math.round(monthly * 0.6),
+    scope: "3-5 правок, которые ближе всего к заявкам и продажам"
+  };
+}
+
+function scoreMoneyLead(business, report, payload, issue, offer) {
+  const hasDirectContact = Boolean(business.email || business.phone);
+  const hasMap = Boolean(business.mapUrl || business.osmUrl);
+  const averageSale = Number(payload.averageSale || 300);
+  let score = 34;
+  score += hasDirectContact ? 18 : hasMap ? 8 : 0;
+  score += business.website ? 8 : 18;
+  score += issue.severity === "high" ? 18 : issue.severity === "medium" ? 10 : 4;
+  score += report?.score?.total && report.score.total < 62 ? 12 : 0;
+  score += report?.money?.monthlyOpportunity > averageSale * 3 ? 10 : 0;
+  score += averageSale >= 700 ? 8 : averageSale >= 300 ? 5 : 1;
+  score += offer.price >= 600 ? 6 : 2;
+  return clampNumber(score, 1, 100, 50);
+}
+
+function estimateClientOpportunity(business, report, payload, issue) {
+  if (report?.money?.monthlyOpportunity) {
+    return Math.round(report.money.monthlyOpportunity);
+  }
+  const averageSale = Number(payload.averageSale || 300);
+  const baseLeads = issue.key === "no_website" ? 4 : 2;
+  const contactLift = business.phone || business.email ? 1 : 0;
+  return roundToNearest(Math.max(averageSale * (baseLeads + contactLift), averageSale * 1.4), 10);
+}
+
+function pickContactRoute(business) {
+  if (business.email) return "email";
+  if (business.phone) return "phone";
+  if (business.website) return "website";
+  if (business.mapUrl || business.osmUrl) return "map";
+  return "research";
+}
+
+function createRecommendedAction(business, issue, contactRoute) {
+  if (contactRoute === "email") return `Отправить email про: ${issue.title}`;
+  if (contactRoute === "phone") return `Позвонить и предложить: ${issue.title}`;
+  if (business.website) return `Открыть сайт и найти контакт для оффера: ${issue.title}`;
+  return "Открыть карту, найти телефон/сайт и предложить стартовый сайт";
+}
+
+function createLeadPitch(business, report, issue, offer, clientOpportunity) {
+  const location = [business.city, business.country].filter(Boolean).join(", ");
+  const host = report?.host || (business.website ? new URL(business.website).hostname : "your business");
+  if (!business.website) {
+    return `Hi ${business.name}, I found your ${business.niche || "local service"} business in ${location}. I could not find a clear website, so mobile customers may leave before calling. I can build a simple booking-ready page with map, phone and request form for about $${offer.price}. Want me to send a quick mockup?`;
+  }
+  return `Hi ${business.name}, I checked ${host}. The fastest revenue leak I found is: ${issue.title}. For a ${business.niche || "local"} business this can easily mean around $${clientOpportunity}/mo in missed demand. I can fix it as a small ${offer.name} for about $${offer.price}, no full redesign needed. Want me to send the exact 3 fixes?`;
+}
+
+function createLeadNextSteps(business, issue, offer) {
+  return [
+    business.website ? "Открыть сайт и проверить контакт владельца" : "Открыть карту и найти телефон/сайт",
+    `Предложить ${offer.name}: ${issue.title}`,
+    "Скопировать питч, отправить вручную, отметить статус в CRM",
+    "Через 48 часов отправить короткий follow-up"
+  ];
+}
+
+function createLeadEvidence(business, report, issue) {
+  const items = [
+    business.website ? "Сайт найден" : "Сайт не найден в OSM",
+    business.phone ? "Есть телефон" : "Телефон не найден",
+    business.email ? "Есть email" : "Email не найден",
+    issue.reason
+  ];
+  if (report?.score?.total) items.push(`Аудит сайта: ${report.score.total}/100`);
+  if (report?.money?.monthlyOpportunity) items.push(`Оценка утечки: $${Math.round(report.money.monthlyOpportunity)}/мес`);
+  return items.filter(Boolean);
+}
+
+function summarizeMoneyPipeline(leads) {
+  const hot = leads.filter((lead) => lead.priority === "hot");
+  const warm = leads.filter((lead) => lead.priority === "warm");
+  const oneTimeValue = leads.reduce((sum, lead) => sum + Number(lead.estimatedDealValue || 0), 0);
+  const monthlyValue = leads.reduce((sum, lead) => sum + Number(lead.recurringValue || 0), 0);
+  const clientOpportunity = leads.reduce((sum, lead) => sum + Number(lead.clientOpportunity || 0), 0);
+
+  return {
+    totalLeads: leads.length,
+    hot: hot.length,
+    warm: warm.length,
+    oneTimeValue,
+    monthlyValue,
+    clientOpportunity,
+    topOffer: leads[0]?.serviceOffer?.name || "",
+    nextBestAction: leads[0]?.recommendedAction || "Запустить поиск лидов"
+  };
+}
+
+function roundToNearest(value, step) {
+  return Math.round(Number(value || 0) / step) * step;
 }
 
 function nicheToOverpassFilters(niche) {
