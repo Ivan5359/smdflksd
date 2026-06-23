@@ -1218,6 +1218,9 @@ function buildMoneyMachineLead(business, report, payload, machine, index) {
   const priority = moneyScore >= 78 ? "hot" : moneyScore >= 58 ? "warm" : "cold";
   const outreach = createLeadOutreach(business, report, issue, offer, health);
   const pitch = outreach.email;
+  const outreachSequence = createOutreachSequence(business, issue, offer, outreach, health);
+  const closeKit = createLeadCloseKit(business, issue, offer, health);
+  const qualityGate = evaluateOutreachQuality(outreach.email, business);
 
   return {
     ...business,
@@ -1238,12 +1241,136 @@ function buildMoneyMachineLead(business, report, payload, machine, index) {
     recommendedAction: createRecommendedAction(business, issue, contactRoute),
     pitch,
     outreach,
+    outreachSequence,
+    closeKit,
+    qualityGate,
     nextSteps: createLeadNextSteps(business, issue, offer),
     evidence: createLeadEvidence(business, report, issue, health),
     topPriority: issue.title,
     moneyOpportunity: clientOpportunity,
     score: report?.score?.total || business.score || moneyScore
   };
+}
+
+function createOutreachSequence(business, issue, offer, outreach, health = getWebsiteHealth(business, null)) {
+  const issueTitle = outboundIssueTitle(issue);
+  const price = formatUsd(offer.price);
+  const firstLine = `I found one small website fix worth checking: ${issueTitle}.`;
+  return [
+    {
+      id: "initial",
+      day: 0,
+      label: "Initial email",
+      channel: business.email ? "email" : business.phone ? "phone" : "research",
+      subject: outreach.subject,
+      body: outreach.email,
+      action: business.email ? "Open Gmail draft and send manually" : "Find owner email or call first"
+    },
+    {
+      id: "followup_48h",
+      day: 2,
+      label: "48h follow-up",
+      channel: business.email ? "email" : "manual",
+      subject: `Re: ${outreach.subject}`,
+      body: outreach.followUp || `Quick follow-up on ${business.name}: ${firstLine} I can send the screenshot plan first, no redesign pitch.`,
+      action: "Send only if there is no reply after 48 hours"
+    },
+    {
+      id: "proof_note",
+      day: 4,
+      label: "Screenshot proof",
+      channel: business.email ? "email" : "manual",
+      subject: `Screenshot note for ${business.name}`,
+      body: [
+        `Hi ${business.name} team,`,
+        "",
+        "Quick last note from me.",
+        "",
+        firstLine,
+        `The useful first step would be a small ${offer.name} (${price}) instead of a full redesign.`,
+        "",
+        "If useful, I can send the screenshot plan. If not, I will close the loop here.",
+        "",
+        "Best,",
+        "Ivan"
+      ].join("\n"),
+      action: "Use as final polite touch, then stop"
+    }
+  ].map((step) => ({
+    ...step,
+    body: sanitizeOutboundText(step.body),
+    ready: !containsLegacyOutreachText(step.body) && !/[А-Яа-яЁё]/.test(String(step.body || ""))
+  }));
+}
+
+function createLeadCloseKit(business, issue, offer, health = getWebsiteHealth(business, null)) {
+  const host = safeHostFromUrl(business.website || "");
+  const issueTitle = outboundIssueTitle(issue);
+  const needs = [];
+  if (business.email) needs.push("owner reply by email");
+  else needs.push("verified owner email");
+  if (business.website && health.reachable !== false) needs.push(`current site access or form destination for ${host || "the website"}`);
+  if (business.phone) needs.push("phone number confirmation");
+
+  return {
+    offerName: offer.name,
+    price: offer.price,
+    monthly: offer.monthly,
+    delivery: issue.key === "site_error" ? "24-48 hours after access/link confirmation" : "2-4 days after approval",
+    scope: [
+      outboundScopeLine(offer.scope),
+      "1-page screenshot plan before work starts",
+      "before/after checklist after delivery",
+      "manual handoff, no long contract"
+    ],
+    paymentAsk: `Fixed-price ${offer.name}: ${formatUsd(offer.price)}${offer.monthly ? ` + optional ${formatUsd(offer.monthly)}/mo maintenance` : ""}.`,
+    qualification: [
+      business.email ? "Public email found" : "Email still needs manual check",
+      business.phone ? "Phone found" : "Phone not found",
+      health.reachable === true ? `Website reachable: HTTP ${health.status || 200}` : health.reachable === false ? "Website link has a serious issue" : "Website needs manual check",
+      issue.severity === "high" ? "High urgency issue" : "Moderate improvement issue"
+    ],
+    assetsNeeded: needs,
+    closeScript: [
+      "Thanks, I can keep this small.",
+      "",
+      `For ${business.name}, I would start with: ${issueTitle}.`,
+      `The fixed sprint is ${formatUsd(offer.price)} and I can send the screenshot plan before you approve anything.`,
+      "",
+      "If you like the plan, I can start after you confirm the best email for form submissions."
+    ].join("\n"),
+    invoiceNote: `${offer.name} for ${business.name}: ${outboundScopeLine(offer.scope)}. Delivery: ${issue.key === "site_error" ? "24-48h" : "2-4 days"}.`
+  };
+}
+
+function evaluateOutreachQuality(text, business = {}) {
+  const value = String(text || "");
+  const checks = {
+    hasSubject: /^Subject:/m.test(value),
+    hasGreeting: /^Hi .+ team,/m.test(value),
+    hasCta: /Should I send|Want me to send|I can send/i.test(value),
+    noLegacyPitch: !containsLegacyOutreachText(value),
+    noRussianInOwnerEmail: !/[А-Яа-яЁё]/.test(value),
+    noFakeGuarantee: !/guarantee|guaranteed|will make|will generate/i.test(value),
+    hasManualTone: /not pitching a full redesign|screenshot plan|fixed-price|small/i.test(value),
+    recipientKnown: Boolean(business.email || business.phone || business.website)
+  };
+  const passed = Object.values(checks).filter(Boolean).length;
+  return {
+    score: Math.round((passed / Object.keys(checks).length) * 100),
+    checks,
+    passed,
+    total: Object.keys(checks).length,
+    ready: passed >= 7 && checks.noLegacyPitch && checks.noRussianInOwnerEmail
+  };
+}
+
+function sanitizeOutboundText(value) {
+  return String(value || "").replace(/\n{3,}/g, "\n\n").trim();
+}
+
+function containsLegacyOutreachText(value) {
+  return /fastest revenue leak|missed demand|exact 3 fixes|For a .+ business this can easily mean|Нет формы заявки/i.test(String(value || ""));
 }
 
 function getWebsiteHealth(business, report) {
@@ -1594,7 +1721,33 @@ function outboundFixLines(issue, offer) {
     images: ["- add useful alt text", "- connect images to service and city terms", "- make image proof support the offer"],
     growth: ["- measure the primary request action", "- test one stronger call-to-action", "- add a simple lead follow-up path"]
   };
-  return lines[issue?.key] || [offer?.scope ? `- ${offer.scope}` : "- send a screenshot plan with the first fix"];
+  return lines[issue?.key] || [offer?.scope ? `- ${outboundScopeLine(offer.scope)}` : "- send a screenshot plan with the first fix"];
+}
+
+function outboundScopeLine(value) {
+  const text = String(value || "").trim();
+  if (!text) return "small website conversion fix";
+  if (!/[А-Яа-яЁё]/.test(text)) return text;
+  const key = text.toLowerCase();
+  if (key.includes("онлайн") || key.includes("мини-форма") || key.includes("заяв")) {
+    return "short request or booking form with owner notifications";
+  }
+  if (key.includes("cta") || key.includes("телефон") || key.includes("контакт")) {
+    return "clear call, form, and contact path for mobile visitors";
+  }
+  if (key.includes("редирект") || key.includes("404") || key.includes("посадоч")) {
+    return "public link cleanup, redirects, and a working landing entry";
+  }
+  if (key.includes("отзыв") || key.includes("довер") || key.includes("гарант")) {
+    return "trust proof moved closer to the request step";
+  }
+  if (key.includes("schema") || key.includes("seo") || key.includes("город")) {
+    return "local SEO and service-area cleanup";
+  }
+  if (key.includes("ускор") || key.includes("аналит")) {
+    return "speed, analytics, and request tracking cleanup";
+  }
+  return "small website conversion fix";
 }
 
 function summarizeMoneyPipeline(leads) {
@@ -1618,6 +1771,14 @@ function summarizeMoneyPipeline(leads) {
 
 function roundToNearest(value, step) {
   return Math.round(Number(value || 0) / step) * step;
+}
+
+function formatUsd(value) {
+  return new Intl.NumberFormat("en-US", {
+    style: "currency",
+    currency: "USD",
+    maximumFractionDigits: 0
+  }).format(Number(value || 0));
 }
 
 function nicheToOverpassFilters(niche) {

@@ -26,7 +26,14 @@ const expectedMarkers = [
   "Owner email",
   "Проверить сайт",
   "TXT pack",
-  "Google поиск"
+  "Google поиск",
+  "Daily Send Queue",
+  "Gmail drafts ready",
+  "Email QA",
+  "Close Kit",
+  "Reply Assistant",
+  "Gmail draft",
+  "Daily plan"
 ];
 
 const indexHtml = await fs.readFile(indexPath, "utf8");

@@ -166,6 +166,7 @@ function App() {
   const [error, setError] = useState("");
   const [copied, setCopied] = useState("");
   const [serverVersion, setServerVersion] = useState(APP_VERSION);
+  const [replyText, setReplyText] = useState("");
 
   useEffect(() => {
     fetch("/__version")
@@ -306,6 +307,15 @@ function App() {
     [moneyLeads, selectedLeadId]
   );
   const selectedLeadLinks = selectedMoneyLead ? getLeadLinks(selectedMoneyLead) : {};
+  const selectedOutreachSequence = selectedMoneyLead ? buildOutreachSequence(selectedMoneyLead) : [];
+  const selectedCloseKit = selectedMoneyLead ? buildCloseKit(selectedMoneyLead) : null;
+  const selectedQualityGate = selectedMoneyLead ? buildOutreachQualityGate(ownerEmailForLead(selectedMoneyLead), selectedMoneyLead) : null;
+  const replyAssistant = useMemo(
+    () => buildReplyAssistant(replyText, selectedMoneyLead),
+    [replyText, selectedMoneyLead]
+  );
+  const dailySendQueue = useMemo(() => buildDailySendQueue(moneyLeads, savedLeads), [moneyLeads, savedLeads]);
+  const automationStats = useMemo(() => summarizeAutomationStats(dailySendQueue, moneyLeads), [dailySendQueue, moneyLeads]);
   const expectedPipelineRevenue = Math.round(
     ((Number(moneyPipeline.oneTimeValue || 0) + Number(moneyPipeline.monthlyValue || 0) * 3) *
       Number(moneySettings.closeRate || 0)) /
@@ -693,6 +703,79 @@ function App() {
 
   async function copyLeadDossier(lead) {
     await copyText(`dossier-${normalizeLead(lead).id}`, buildLeadDossier(lead));
+  }
+
+  function openGmailDraftForLead(leadInput, stepId = "initial") {
+    const lead = normalizeLead(leadInput);
+    const step = buildOutreachSequence(lead).find((item) => item.id === stepId) || buildOutreachSequence(lead)[0];
+    const url = buildGmailComposeUrl(lead, step);
+    if (!url) {
+      setError("У лида нет email. Открой Google/карту, найди email владельца или используй телефон.");
+      return;
+    }
+    window.open(url, "_blank", "noopener,noreferrer");
+    addBusinessToCrm({ ...lead, crmStatus: stepId === "initial" ? "Письмо открыто" : "Follow-up открыт" });
+    setCopied(`gmail-${lead.id}`);
+    window.setTimeout(() => setCopied(""), 1400);
+  }
+
+  function markLeadSent(leadInput) {
+    const lead = normalizeLead(leadInput);
+    const task = {
+      ...crmFromBusiness(lead),
+      status: "Отправлено",
+      sentAt: new Date().toISOString(),
+      nextFollowUpAt: new Date(Date.now() + 48 * 60 * 60 * 1000).toISOString(),
+      nextAction: `Через 48 часов follow-up: ${lead.name}`
+    };
+    setCrm((current) => {
+      const next = mergeCrm([task], current);
+      writeLocal("sitemoney.crm", next);
+      return next;
+    });
+    setCopied(`sent-${lead.id}`);
+    window.setTimeout(() => setCopied(""), 1400);
+  }
+
+  async function copySequenceStep(leadInput, stepId = "initial") {
+    const lead = normalizeLead(leadInput);
+    const step = buildOutreachSequence(lead).find((item) => item.id === stepId) || buildOutreachSequence(lead)[0];
+    await copyText(`sequence-${lead.id}-${stepId}`, step?.body || ownerEmailForLead(lead));
+  }
+
+  async function copyCloseKit(leadInput) {
+    const lead = normalizeLead(leadInput);
+    await copyText(`closekit-${lead.id}`, buildCloseKitText(lead));
+  }
+
+  async function copyReplyAssistant() {
+    if (!replyAssistant?.response) return;
+    await copyText("reply-assistant", replyAssistant.response);
+  }
+
+  function downloadDailySendPlan() {
+    if (!dailySendQueue.length) return;
+    const body = dailySendQueue
+      .map((lead, index) => {
+        const sequence = buildOutreachSequence(lead);
+        const first = sequence[0];
+        return [
+          `#${index + 1} ${lead.name}`,
+          [lead.city, lead.country].filter(Boolean).join(", "),
+          `Email: ${lead.email || "needs manual email"}`,
+          `Website: ${getLeadLinks(lead).website || "manual check"}`,
+          `Quality: ${lead.qualityGate?.score || buildOutreachQualityGate(ownerEmailForLead(lead), lead).score}/100`,
+          `Subject: ${first?.subject || lead.outreach?.subject || ""}`,
+          "",
+          first?.body || ownerEmailForLead(lead),
+          "",
+          `48h follow-up: ${sequence[1]?.body || buildLeadFollowUp(lead)}`
+        ].join("\n");
+      })
+      .join("\n\n---\n\n");
+    downloadBlob(new Blob([body], { type: "text/plain;charset=utf-8" }), "sitemoney-daily-send-plan.txt");
+    setCopied("daily-plan");
+    window.setTimeout(() => setCopied(""), 1400);
   }
 
   function downloadOutreachPack() {
@@ -1309,6 +1392,10 @@ function App() {
                   <Clipboard size={15} />
                   TXT pack
                 </button>
+                <button className="secondary-button" onClick={downloadDailySendPlan} disabled={!dailySendQueue.length}>
+                  <Send size={15} />
+                  Daily plan
+                </button>
               </div>
             </div>
 
@@ -1370,7 +1457,47 @@ function App() {
                 value={money(expectedPipelineRevenue)}
                 note={`${moneySettings.closeRate}% close rate`}
               />
+              <MetricBlock
+                icon={<Mail size={18} />}
+                label="Готово к отправке"
+                value={automationStats.sendReady}
+                note={`${automationStats.avgQuality || 0}/100 email QA`}
+              />
             </div>
+
+            <section className="automation-console" aria-label="Daily Send Queue">
+              <div className="console-head">
+                <div>
+                  <span>Daily Send Queue</span>
+                  <strong>{automationStats.withGmail} Gmail drafts ready</strong>
+                </div>
+                <button className="secondary-button" type="button" onClick={downloadDailySendPlan} disabled={!dailySendQueue.length}>
+                  <Download size={15} />
+                  Send plan
+                </button>
+              </div>
+              <div className="send-queue-list">
+                {dailySendQueue.slice(0, 5).map((lead) => {
+                  const gate = buildOutreachQualityGate(ownerEmailForLead(lead), lead);
+                  return (
+                    <article key={`send-${lead.id}`}>
+                      <div>
+                        <strong>{lead.name}</strong>
+                        <span>{lead.email}</span>
+                      </div>
+                      <b>{gate.score}/100</b>
+                      <button type="button" onClick={() => openGmailDraftForLead(lead)}>
+                        Gmail
+                      </button>
+                      <button type="button" onClick={() => markLeadSent(lead)}>
+                        Sent
+                      </button>
+                    </article>
+                  );
+                })}
+                {!dailySendQueue.length ? <p className="empty-state">Нет лидов с email и чистым письмом. Запусти Money Machine или проверь контакты.</p> : null}
+              </div>
+            </section>
 
             {selectedMoneyLead ? (
               <section className="lead-workbench" aria-label="Lead Workbench">
@@ -1410,6 +1537,76 @@ function App() {
                   </div>
                 </div>
 
+                <div className="quality-gate">
+                  <div className="quality-score">
+                    <span>Email QA</span>
+                    <strong>{selectedQualityGate?.score || 0}/100</strong>
+                  </div>
+                  <div className="quality-checks">
+                    {(selectedQualityGate?.checks || []).map((item) => (
+                      <span key={item.id} className={item.ok ? "ready" : "missing"}>
+                        {item.ok ? "✓" : "!"} {item.label}
+                      </span>
+                    ))}
+                  </div>
+                </div>
+
+                <div className="outreach-sequence">
+                  {selectedOutreachSequence.map((step) => (
+                    <article key={`${selectedMoneyLead.id}-${step.id}`}>
+                      <div>
+                        <span>D+{step.day}</span>
+                        <strong>{step.label}</strong>
+                        <p>{step.action}</p>
+                      </div>
+                      <button type="button" onClick={() => copySequenceStep(selectedMoneyLead, step.id)}>
+                        Copy
+                      </button>
+                      <button type="button" onClick={() => openGmailDraftForLead(selectedMoneyLead, step.id)} disabled={!selectedMoneyLead.email}>
+                        Gmail
+                      </button>
+                    </article>
+                  ))}
+                </div>
+
+                <div className="closekit-grid">
+                  <section>
+                    <span>Close Kit</span>
+                    <strong>
+                      {selectedCloseKit?.offerName || "Conversion Sprint"} · {money(selectedCloseKit?.price || selectedMoneyLead.estimatedDealValue || 0)}
+                    </strong>
+                    <p>{selectedCloseKit?.paymentAsk || "Fixed-price small sprint."}</p>
+                    <button type="button" onClick={() => copyCloseKit(selectedMoneyLead)}>
+                      Copy close kit
+                    </button>
+                  </section>
+                  <section>
+                    <span>Need from client</span>
+                    {(selectedCloseKit?.assetsNeeded || []).slice(0, 3).map((item) => (
+                      <p key={item}>- {item}</p>
+                    ))}
+                  </section>
+                </div>
+
+                <div className="reply-assistant">
+                  <div>
+                    <span>Reply Assistant</span>
+                    <strong>{replyAssistant.label}</strong>
+                    <p>{replyAssistant.nextAction}</p>
+                  </div>
+                  <textarea
+                    value={replyText}
+                    onChange={(event) => setReplyText(event.target.value)}
+                    placeholder="Вставь сюда ответ фирмы, сайт подготовит следующий ответ"
+                  />
+                  <div className="reply-output">
+                    <pre>{replyAssistant.response || "Ответ появится здесь после вставки текста клиента."}</pre>
+                    <button type="button" onClick={copyReplyAssistant} disabled={!replyAssistant.response}>
+                      Copy reply
+                    </button>
+                  </div>
+                </div>
+
                 <div className="workbench-actions">
                   <button className="primary-button" type="button" onClick={() => auditLeadWebsite(selectedMoneyLead)} disabled={!selectedLeadLinks.website || loading}>
                     <Search size={15} />
@@ -1419,9 +1616,15 @@ function App() {
                   <ActionLink href={selectedLeadLinks.map || selectedLeadLinks.osm}>Карта</ActionLink>
                   <ActionLink href={selectedLeadLinks.search}>Google поиск</ActionLink>
                   <ActionLink href={selectedLeadLinks.email}>Email</ActionLink>
+                  <button type="button" onClick={() => openGmailDraftForLead(selectedMoneyLead)} disabled={!selectedMoneyLead.email}>
+                    Gmail draft
+                  </button>
                   <ActionLink href={selectedLeadLinks.phone}>Телефон</ActionLink>
                   <button type="button" onClick={() => copyLeadBrief(selectedMoneyLead)}>
                     Питч
+                  </button>
+                  <button type="button" onClick={() => markLeadSent(selectedMoneyLead)}>
+                    Mark sent
                   </button>
                   <button type="button" onClick={() => copyLeadDossier(selectedMoneyLead)}>
                     Бриф
@@ -1476,8 +1679,14 @@ function App() {
                       <button type="button" onClick={() => copyLeadBrief(lead)}>
                         Питч
                       </button>
+                      <button type="button" onClick={() => openGmailDraftForLead(lead)} disabled={!lead.email}>
+                        Gmail
+                      </button>
                       <button type="button" onClick={() => addBusinessToCrm(lead)}>
                         CRM
+                      </button>
+                      <button type="button" onClick={() => markLeadSent(lead)}>
+                        Sent
                       </button>
                     </div>
                     <div className="lead-actions money-actions link-actions">
@@ -1873,7 +2082,7 @@ function crmFromBusiness(business) {
   return {
     id: `lead-${normalized.id}`,
     host: links.website ? safeHost(links.website) : normalized.name,
-    status: "Новый",
+    status: business.crmStatus || "Новый",
     value: normalized.estimatedDealValue || normalized.moneyOpportunity || 0,
     nextAction:
       normalized.recommendedAction ||
@@ -1903,7 +2112,7 @@ function mergeLeads(incoming, current) {
 
 function normalizeLead(lead) {
   const safeOutreach = sanitizeLeadOutreach(lead.outreach);
-  const safePitch = isLegacyOutreachText(lead.pitch) ? "" : String(lead.pitch || "");
+  const safePitch = isUnsafeOwnerMessage(lead.pitch) ? "" : String(lead.pitch || "");
   const normalized = {
     id: lead.id || `${lead.name}-${lead.website || lead.osmUrl || Date.now()}`,
     name: lead.name || "Unknown business",
@@ -1933,6 +2142,9 @@ function normalizeLead(lead) {
     recommendedAction: lead.recommendedAction || "",
     pitch: safeOutreach?.email || safePitch,
     outreach: safeOutreach,
+    outreachSequence: Array.isArray(lead.outreachSequence) ? lead.outreachSequence : [],
+    closeKit: lead.closeKit || null,
+    qualityGate: lead.qualityGate || null,
     evidence: lead.evidence || [],
     nextSteps: lead.nextSteps || [],
     topPriority: lead.topPriority || lead.suggestedAction || "Ждет аудита",
@@ -1950,11 +2162,16 @@ function isLegacyOutreachText(value) {
   return LEGACY_OUTREACH_PATTERN.test(String(value || ""));
 }
 
+function isUnsafeOwnerMessage(value) {
+  const text = String(value || "");
+  return isLegacyOutreachText(text) || /[А-Яа-яЁё]/.test(text);
+}
+
 function sanitizeLeadOutreach(outreach) {
   if (!outreach || typeof outreach !== "object") return null;
   const next = { ...outreach };
   for (const key of ["email", "followUp", "dm", "telegram", "callScript"]) {
-    if (isLegacyOutreachText(next[key])) next[key] = "";
+    if (isUnsafeOwnerMessage(next[key])) next[key] = "";
   }
   if (next.email || next.followUp || next.dm || next.telegram || next.callScript) return next;
   return null;
@@ -2114,6 +2331,345 @@ function getLeadLinks(leadInput) {
   };
 }
 
+function buildGmailComposeUrl(leadInput, stepInput = null) {
+  const lead = normalizeLead(leadInput || {});
+  if (!lead.email) return "";
+  const step = stepInput || buildOutreachSequence(lead)[0];
+  const subject = step?.subject || lead.outreach?.subject || `Website note for ${lead.name}`;
+  const body = step?.body || ownerEmailForLead(lead);
+  return `https://mail.google.com/mail/?view=cm&fs=1&to=${encodeURIComponent(lead.email)}&su=${encodeURIComponent(stripSubjectPrefix(subject))}&body=${encodeURIComponent(stripSubjectLine(body))}`;
+}
+
+function stripSubjectPrefix(value) {
+  return String(value || "").replace(/^Subject:\s*/i, "").trim();
+}
+
+function stripSubjectLine(value) {
+  return String(value || "").replace(/^Subject:.*\n{1,2}/i, "").trim();
+}
+
+function buildOutreachSequence(leadInput) {
+  const lead = normalizeLead(leadInput || {});
+  if (Array.isArray(lead.outreachSequence) && lead.outreachSequence.length) {
+    return lead.outreachSequence.map((step, index) => {
+      let fallbackBody = ownerEmailForLead(lead);
+      if (step.id === "followup_48h" || index === 1) fallbackBody = buildLeadFollowUp({ ...lead, outreach: null });
+      if (step.id === "proof_note" || index === 2) fallbackBody = buildProofNote(lead);
+      const body = isUnsafeOwnerMessage(step.body) ? fallbackBody : step.body || fallbackBody;
+      return {
+        ...step,
+        subject: stripSubjectPrefix(step.subject || lead.outreach?.subject || `Website note for ${lead.name}`),
+        body,
+        ready: step.ready !== false && !isUnsafeOwnerMessage(body)
+      };
+    });
+  }
+  const subject = stripSubjectPrefix(lead.outreach?.subject || `Small website fix for ${lead.name}`);
+  const first = ownerEmailForLead(lead);
+  return [
+    {
+      id: "initial",
+      day: 0,
+      label: "Initial email",
+      channel: lead.email ? "email" : "manual",
+      subject,
+      body: first,
+      action: lead.email ? "Open Gmail draft and send manually" : "Find owner email first",
+      ready: !isLegacyOutreachText(first)
+    },
+    {
+      id: "followup_48h",
+      day: 2,
+      label: "48h follow-up",
+      channel: lead.email ? "email" : "manual",
+      subject: `Re: ${subject}`,
+      body: buildLeadFollowUp(lead),
+      action: "Send only if no reply after 48 hours",
+      ready: true
+    },
+    {
+      id: "proof_note",
+      day: 4,
+      label: "Final proof note",
+      channel: lead.email ? "email" : "manual",
+      subject: `Screenshot note for ${lead.name}`,
+      body: buildProofNote(lead),
+      action: "Last polite note, then stop",
+      ready: true
+    }
+  ];
+}
+
+function buildProofNote(leadInput) {
+  const lead = normalizeLead(leadInput || {});
+  const closeKit = buildCloseKit(lead);
+  return [
+    `Hi ${lead.name} team,`,
+    "",
+    "Quick last note from me.",
+    "",
+    `I noticed one small website fix worth checking: ${ownerSafeIssueTitle(lead.opportunity || lead.topPriority)}.`,
+    `The useful first step would be a small ${closeKit.offerName} (${moneyText(closeKit.price)}), not a full redesign.`,
+    "",
+    "If useful, I can send the screenshot plan. If not, I will close the loop here.",
+    "",
+    "Best,",
+    "Ivan"
+  ].join("\n");
+}
+
+function buildCloseKit(leadInput) {
+  const lead = normalizeLead(leadInput || {});
+  const baseKit = lead.closeKit || {};
+  const offerName = baseKit.offerName || lead.serviceOffer?.name || "Conversion Sprint";
+  const price = Number(baseKit.price || lead.serviceOffer?.price || lead.estimatedDealValue || 390);
+  const monthly = Number(baseKit.monthly || lead.serviceOffer?.monthly || lead.recurringValue || 0);
+  const rawScope = Array.isArray(baseKit.scope) && baseKit.scope.length
+    ? baseKit.scope
+    : [
+        lead.serviceOffer?.scope || "Small website fix focused on calls, forms, and trust",
+        "1-page screenshot plan before work starts",
+        "before/after checklist after delivery",
+        "manual handoff, no long contract"
+      ];
+  return {
+    offerName,
+    price,
+    monthly,
+    delivery: baseKit.delivery || "2-4 days after approval",
+    scope: rawScope.map(ownerSafeScopeLine),
+    paymentAsk: `Fixed-price ${offerName}: ${moneyText(price)}.`,
+    qualification: Array.isArray(baseKit.qualification) && baseKit.qualification.length ? baseKit.qualification : [
+      lead.email ? "Public email found" : "Email needs manual check",
+      lead.phone ? "Phone found" : "Phone not found",
+      lead.websiteReachable === true ? `Website checked: HTTP ${lead.websiteStatus || 200}` : "Website needs manual check",
+      lead.priority === "hot" ? "Hot lead" : "Needs manual qualification"
+    ],
+    assetsNeeded: Array.isArray(baseKit.assetsNeeded) && baseKit.assetsNeeded.length ? baseKit.assetsNeeded : [
+      lead.email ? "reply by email" : "verified owner email",
+      "best destination email for form submissions",
+      "approval on screenshot plan"
+    ],
+    closeScript: [
+      "Thanks, I can keep this small.",
+      "",
+      `For ${lead.name}, I would start with: ${ownerSafeIssueTitle(lead.opportunity || lead.topPriority)}.`,
+      `The fixed sprint is ${moneyText(price)} and I can send the screenshot plan before you approve anything.`,
+      "",
+      "If you like the plan, I can start after you confirm the best email for form submissions."
+    ].join("\n"),
+    invoiceNote: `${offerName} for ${lead.name}: ${ownerSafeScopeLine(lead.serviceOffer?.scope || "small website conversion fix")}.`
+  };
+}
+
+function ownerSafeScopeLine(value) {
+  const text = String(value || "").trim();
+  if (!text) return "Small website conversion fix";
+  if (!/[А-Яа-яЁё]/.test(text)) return text;
+  const key = text.toLowerCase();
+  if (key.includes("онлайн") || key.includes("мини-форма") || key.includes("заяв")) return "Short request or booking form with owner notifications";
+  if (key.includes("cta") || key.includes("телефон") || key.includes("контакт")) return "Clear call, form, and contact path for mobile visitors";
+  if (key.includes("редирект") || key.includes("404") || key.includes("посадоч")) return "Public link cleanup, redirects, and a working landing entry";
+  if (key.includes("отзыв") || key.includes("довер") || key.includes("гарант")) return "Trust proof moved closer to the request step";
+  if (key.includes("schema") || key.includes("seo") || key.includes("город")) return "Local SEO and service-area cleanup";
+  if (key.includes("ускор") || key.includes("аналит")) return "Speed, analytics, and request tracking cleanup";
+  return "Small website conversion fix";
+}
+
+function buildOutreachQualityGate(textInput, leadInput) {
+  const lead = normalizeLead(leadInput || {});
+  const text = String(textInput || "");
+  const checks = [
+    { id: "recipient", label: "Email найден", ok: Boolean(lead.email) },
+    { id: "subject", label: "Есть тема", ok: /^Subject:/m.test(text) || Boolean(lead.outreach?.subject) },
+    { id: "greeting", label: "Есть приветствие", ok: /^Hi .+ team,/m.test(text) },
+    { id: "cta", label: "Есть мягкий CTA", ok: /Should I send|Want me to send|I can send/i.test(text) },
+    { id: "legacy", label: "Нет старого спама", ok: !isLegacyOutreachText(text) },
+    { id: "language", label: "Нет русского в письме", ok: !/[А-Яа-яЁё]/.test(text) },
+    { id: "promise", label: "Нет гарантий дохода", ok: !/guarantee|guaranteed|will make|will generate/i.test(text) },
+    { id: "small", label: "Маленький первый шаг", ok: /not pitching a full redesign|screenshot plan|fixed-price|small/i.test(text) }
+  ];
+  const passed = checks.filter((item) => item.ok).length;
+  return {
+    score: Math.round((passed / checks.length) * 100),
+    checks,
+    ready:
+      passed >= 7 &&
+      checks.find((item) => item.id === "legacy")?.ok &&
+      checks.find((item) => item.id === "language")?.ok &&
+      checks.find((item) => item.id === "promise")?.ok
+  };
+}
+
+function buildDailySendQueue(moneyLeads, savedLeads) {
+  const seen = new Set();
+  return [...moneyLeads, ...savedLeads.map(normalizeLead)]
+    .filter((lead) => {
+      if (!lead?.id || seen.has(lead.id)) return false;
+      seen.add(lead.id);
+      if (!lead.email) return false;
+      if (lead.websiteReachable === false) return false;
+      if (isLegacyOutreachText(ownerEmailForLead(lead))) return false;
+      return true;
+    })
+    .sort((a, b) => {
+      const aQuality = buildOutreachQualityGate(ownerEmailForLead(a), a).score;
+      const bQuality = buildOutreachQualityGate(ownerEmailForLead(b), b).score;
+      return (b.priority === "hot") - (a.priority === "hot") || bQuality - aQuality || (b.moneyScore || 0) - (a.moneyScore || 0);
+    })
+    .slice(0, 12);
+}
+
+function summarizeAutomationStats(queue, moneyLeads) {
+  const sendReady = queue.length;
+  const withEmail = moneyLeads.filter((lead) => lead.email).length;
+  const withGmail = queue.filter((lead) => buildGmailComposeUrl(lead)).length;
+  const avgQuality = queue.length
+    ? Math.round(queue.reduce((sum, lead) => sum + buildOutreachQualityGate(ownerEmailForLead(lead), lead).score, 0) / queue.length)
+    : 0;
+  return { sendReady, withEmail, withGmail, avgQuality };
+}
+
+function buildReplyAssistant(replyText, leadInput) {
+  const lead = leadInput ? normalizeLead(leadInput) : null;
+  const text = String(replyText || "").trim();
+  if (!lead || !text) {
+    return {
+      intent: "waiting",
+      label: "Вставь ответ фирмы",
+      nextAction: "Когда фирма ответит, вставь сюда текст, и сайт подготовит следующий ответ.",
+      response: ""
+    };
+  }
+  const lower = text.toLowerCase();
+  const closeKit = buildCloseKit(lead);
+  const positive = /\b(send|show|sure|yes|interested|ok|okay|go ahead|sounds good|tell me|details|plan)\b/i.test(text);
+  const price = /\b(price|cost|how much|fee|budget|charge|expensive|pay)\b/i.test(text);
+  const notInterested = /\b(no thanks|not interested|stop|unsubscribe|remove|don't email|do not email)\b/i.test(text);
+  const alreadyHandled = /\b(already|we have|in house|agency|developer|web guy|team)\b/i.test(text);
+  const askProof = /\b(screenshot|example|proof|what did you find|issue|problem)\b/i.test(text);
+
+  if (notInterested) {
+    return {
+      intent: "stop",
+      label: "Отказ / stop",
+      nextAction: "Не писать повторно. Отметь CRM как No.",
+      response: [`Hi ${lead.name} team,`, "", "Understood. I will not follow up again.", "", "Best,", "Ivan"].join("\n")
+    };
+  }
+
+  if (price) {
+    return {
+      intent: "price",
+      label: "Спросили цену",
+      nextAction: "Отправить цену и маленький scope, не грузить деталями.",
+      response: [
+        `Hi ${lead.name} team,`,
+        "",
+        `For this first sprint, I would keep it fixed-price at ${moneyText(closeKit.price)}.`,
+        "",
+        "That includes:",
+        ...closeKit.scope.slice(0, 3).map((item) => `- ${item}`),
+        "",
+        "I can send the screenshot plan first, so you can approve the exact change before any work starts.",
+        "",
+        "Best,",
+        "Ivan"
+      ].join("\n")
+    };
+  }
+
+  if (positive || askProof) {
+    return {
+      intent: "positive",
+      label: "Есть интерес",
+      nextAction: "Отправить screenshot plan / close kit и спросить лучший email для форм.",
+      response: [
+        `Hi ${lead.name} team,`,
+        "",
+        "Thanks. I will keep this simple.",
+        "",
+        `The first thing I would check is: ${ownerSafeIssueTitle(lead.opportunity || lead.topPriority)}.`,
+        "",
+        "I can send the screenshot plan with:",
+        "- the exact screen I checked",
+        "- the small change I would make first",
+        "- where the request/contact should route",
+        "",
+        `If you like it, the fixed sprint would be ${moneyText(closeKit.price)}.`,
+        "",
+        "What is the best email to use for form/request notifications?",
+        "",
+        "Best,",
+        "Ivan"
+      ].join("\n")
+    };
+  }
+
+  if (alreadyHandled) {
+    return {
+      intent: "handled",
+      label: "У них уже есть человек",
+      nextAction: "Не спорить. Предложить одноразовый screenshot note.",
+      response: [
+        `Hi ${lead.name} team,`,
+        "",
+        "Makes sense.",
+        "",
+        "I am not trying to replace anyone. I can just send the screenshot note as a second pair of eyes, and your current person can use it if it is helpful.",
+        "",
+        "Should I send that over?",
+        "",
+        "Best,",
+        "Ivan"
+      ].join("\n")
+    };
+  }
+
+  return {
+    intent: "unclear",
+    label: "Нейтральный ответ",
+    nextAction: "Уточнить интерес одним коротким вопросом.",
+    response: [
+      `Hi ${lead.name} team,`,
+      "",
+      "Thanks for getting back to me.",
+      "",
+      "To keep this useful: do you want me to send the 1-page screenshot plan first, so you can see the exact change before discussing any work?",
+      "",
+      "Best,",
+      "Ivan"
+    ].join("\n")
+  };
+}
+
+function buildCloseKitText(leadInput) {
+  const lead = normalizeLead(leadInput || {});
+  const closeKit = buildCloseKit(lead);
+  return [
+    `${lead.name} - ${closeKit.offerName}`,
+    [lead.city, lead.country].filter(Boolean).join(", "),
+    "",
+    `Price: ${moneyText(closeKit.price)}${closeKit.monthly ? ` + ${moneyText(closeKit.monthly)}/mo optional` : ""}`,
+    `Delivery: ${closeKit.delivery}`,
+    `Payment ask: ${closeKit.paymentAsk}`,
+    "",
+    "Scope:",
+    ...(closeKit.scope || []).map((item) => `- ${item}`),
+    "",
+    "Qualification:",
+    ...(closeKit.qualification || []).map((item) => `- ${item}`),
+    "",
+    "Need from client:",
+    ...(closeKit.assetsNeeded || []).map((item) => `- ${item}`),
+    "",
+    "Close script:",
+    closeKit.closeScript,
+    "",
+    `Invoice note: ${closeKit.invoiceNote}`
+  ].join("\n");
+}
+
 function buildLeadSearchUrl(leadInput) {
   const lead = normalizeLead(leadInput || {});
   const query = [lead.name, lead.city, lead.country, lead.niche, "website", "contact"]
@@ -2195,7 +2751,8 @@ function ownerSafeIssueTitle(value) {
 
 function ownerEmailForLead(leadInput) {
   const lead = normalizeLead(leadInput || {});
-  return lead.outreach?.email || lead.pitch || buildLeadPitchFallback(lead);
+  const primary = lead.outreach?.email || lead.pitch;
+  return primary && !isUnsafeOwnerMessage(primary) ? primary : buildLeadPitchFallback(lead);
 }
 
 function buildLeadSteps(leadInput) {
@@ -2247,12 +2804,12 @@ function buildLeadDossier(leadInput) {
 
 function buildLeadFollowUp(leadInput) {
   const lead = normalizeLead(leadInput || {});
-  if (lead.outreach?.followUp) return lead.outreach.followUp;
+  if (lead.outreach?.followUp && !isUnsafeOwnerMessage(lead.outreach.followUp)) return lead.outreach.followUp;
   if (lead.websiteReachable === false) {
-    const status = lead.websiteStatus ? `HTTP ${lead.websiteStatus}` : "did not load";
-    return `Quick follow-up on ${lead.name}: the public website link I found returned ${status}. I can send the screenshot and exact link first, no redesign pitch.`;
+    const status = lead.websiteStatus ? `returned HTTP ${lead.websiteStatus}` : "did not load from my check";
+    return `Quick follow-up on ${lead.name}: the public website link I found ${status}. I can send the screenshot and exact link first, no redesign pitch.`;
   }
-  const issue = lead.opportunity || lead.topPriority || "one small website issue";
+  const issue = ownerSafeIssueTitle(lead.opportunity || lead.topPriority || "one small website issue");
   return `Quick follow-up on ${lead.name}: I found one small website fix worth checking (${issue}). I can send the screenshot plan first so you can judge it before talking about any work.`;
 }
 
