@@ -176,34 +176,6 @@ function App() {
   }, []);
 
   useEffect(() => {
-    let cancelled = false;
-    async function restoreLatestJob() {
-      try {
-        const response = await fetch("/api/jobs/latest?type=lead-machine", { cache: "no-store" });
-        const payload = await response.json();
-        if (cancelled) return;
-        if (!isCurrentJob(payload.job)) {
-          clearBackgroundJob();
-          resetMoneyMachine();
-          return;
-        }
-        rememberBackgroundJob(payload.job);
-        const active = ["queued", "running"].includes(payload.job.status);
-        setMoneyLoading(active);
-        if (payload.job.status === "completed" && payload.job.result) {
-          applyMoneyMachineData(payload.job.result, payload.job, false);
-        }
-      } catch {
-        // The site still works as a local saved dashboard if the server job endpoint is not ready yet.
-      }
-    }
-    restoreLatestJob();
-    return () => {
-      cancelled = true;
-    };
-  }, []);
-
-  useEffect(() => {
     if (!backgroundJob?.id || !["queued", "running"].includes(backgroundJob.status)) return undefined;
     let cancelled = false;
     const poll = () => {
