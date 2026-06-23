@@ -560,7 +560,14 @@ async function inspectFrontendBuild() {
     ownerEmail: "Owner email",
     safeAuditAction: "Проверить сайт",
     outreachPack: "TXT pack",
-    googleSearch: "Google поиск"
+    googleSearch: "Google поиск",
+    dailySendQueue: "Daily Send Queue",
+    gmailDraftsReady: "Gmail drafts ready",
+    emailQA: "Email QA",
+    closeKit: "Close Kit",
+    replyAssistant: "Reply Assistant",
+    gmailDraft: "Gmail draft",
+    dailyPlan: "Daily plan"
   };
 
   try {
