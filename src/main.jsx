@@ -316,6 +316,34 @@ function App() {
   );
   const dailySendQueue = useMemo(() => buildDailySendQueue(moneyLeads, savedLeads), [moneyLeads, savedLeads]);
   const automationStats = useMemo(() => summarizeAutomationStats(dailySendQueue, moneyLeads), [dailySendQueue, moneyLeads]);
+  const profitCockpit = useMemo(
+    () =>
+      buildProfitCockpit({
+        moneyLeads,
+        dailySendQueue,
+        crm,
+        moneyPipeline,
+        moneySettings,
+        backgroundJob,
+        selectedLead: selectedMoneyLead
+      }),
+    [moneyLeads, dailySendQueue, crm, moneyPipeline, moneySettings, backgroundJob, selectedMoneyLead]
+  );
+  const workdayActions = useMemo(
+    () =>
+      buildWorkdayActions({
+        moneyLeads,
+        dailySendQueue,
+        selectedLead: selectedMoneyLead,
+        backgroundJob,
+        profitCockpit
+      }),
+    [moneyLeads, dailySendQueue, selectedMoneyLead, backgroundJob, profitCockpit]
+  );
+  const selectedDealLadder = useMemo(
+    () => (selectedMoneyLead ? buildDealLadder(selectedMoneyLead, selectedQualityGate, crm) : []),
+    [selectedMoneyLead, selectedQualityGate, crm]
+  );
   const expectedPipelineRevenue = Math.round(
     ((Number(moneyPipeline.oneTimeValue || 0) + Number(moneyPipeline.monthlyValue || 0) * 3) *
       Number(moneySettings.closeRate || 0)) /
@@ -778,6 +806,56 @@ function App() {
     window.setTimeout(() => setCopied(""), 1400);
   }
 
+  async function copyTodayPlan() {
+    await copyText("profit-cockpit-plan", buildTodayPlanText(profitCockpit, workdayActions, dailySendQueue));
+  }
+
+  function downloadProfitSprintPlan() {
+    const body = [
+      "SiteMoney Profit Sprint",
+      `Version: ${APP_VERSION}`,
+      `Expected 7-day value: ${moneyText(profitCockpit.expected7DayValue)}`,
+      `Send-ready leads: ${profitCockpit.sendReady}`,
+      `Pipeline: ${moneyText(profitCockpit.pipelineValue)}`,
+      `Focus lead: ${profitCockpit.focusLead?.name || "none"}`,
+      "",
+      buildTodayPlanText(profitCockpit, workdayActions, dailySendQueue)
+    ].join("\n");
+    downloadBlob(new Blob([body], { type: "text/plain;charset=utf-8" }), "sitemoney-profit-sprint.txt");
+    setCopied("profit-sprint");
+    window.setTimeout(() => setCopied(""), 1400);
+  }
+
+  async function runOperatorAction(action) {
+    if (!action || action.disabled) return;
+    if (action.id === "scan") {
+      await runMoneyMachine();
+      return;
+    }
+    if (action.id === "gmail") {
+      const lead = dailySendQueue.find((item) => item.id === action.leadId) || dailySendQueue[0];
+      if (lead) openGmailDraftForLead(lead);
+      return;
+    }
+    if (action.id === "sent") {
+      const lead = dailySendQueue.find((item) => item.id === action.leadId) || selectedMoneyLead;
+      if (lead) markLeadSent(lead);
+      return;
+    }
+    if (action.id === "dossier") {
+      const lead = selectedMoneyLead || profitCockpit.focusLead || dailySendQueue[0] || moneyLeads[0];
+      if (lead) await copyLeadDossier(lead);
+      return;
+    }
+    if (action.id === "plan") {
+      await copyTodayPlan();
+      return;
+    }
+    if (action.id === "export") {
+      downloadProfitSprintPlan();
+    }
+  }
+
   function downloadOutreachPack() {
     const source = moneyLeads.length ? moneyLeads : filteredDiscovery.map(normalizeLead);
     if (!source.length) return;
@@ -1021,6 +1099,13 @@ function App() {
           </button>
         </div>
       </header>
+
+      {copied ? (
+        <div className="copy-toast" role="status" aria-live="polite">
+          <Check size={15} />
+          <span>{copyStatusLabel(copied)}</span>
+        </div>
+      ) : null}
 
       <main className="mission-grid">
         <aside className="launch-column" id="automation">
@@ -1399,6 +1484,78 @@ function App() {
               </div>
             </div>
 
+            <section className="profit-cockpit" aria-label="Profit Cockpit">
+              <div className="cockpit-hero">
+                <div>
+                  <span>Profit Cockpit</span>
+                  <strong>{money(profitCockpit.expected7DayValue)}</strong>
+                  <p>{profitCockpit.statusLine}</p>
+                </div>
+                <div className="cockpit-ring" aria-label={`Profit score ${profitCockpit.profitScore}`}>
+                  <svg viewBox="0 0 120 120" role="img">
+                    <circle cx="60" cy="60" r="50" />
+                    <circle cx="60" cy="60" r="50" style={{ strokeDasharray: `${profitCockpit.profitScore * 3.14} 314` }} />
+                  </svg>
+                  <b>{profitCockpit.profitScore}</b>
+                  <small>profit score</small>
+                </div>
+              </div>
+
+              <div className="cockpit-kpis">
+                <div>
+                  <span>Pipeline</span>
+                  <strong>{money(profitCockpit.pipelineValue)}</strong>
+                  <p>{money(profitCockpit.monthlyValue)}/mo retainer</p>
+                </div>
+                <div>
+                  <span>Send-ready</span>
+                  <strong>{profitCockpit.sendReady}</strong>
+                  <p>{profitCockpit.gmailReady} Gmail drafts</p>
+                </div>
+                <div>
+                  <span>Close math</span>
+                  <strong>{profitCockpit.closeRate}%</strong>
+                  <p>{money(profitCockpit.expectedPerSend)} per send</p>
+                </div>
+                <div>
+                  <span>Focus</span>
+                  <strong>{profitCockpit.focusLead?.name || "No lead"}</strong>
+                  <p>{profitCockpit.focusNote}</p>
+                </div>
+              </div>
+
+              <div className="operator-playbook" aria-label="Today Operator Plan">
+                <div className="operator-head">
+                  <div>
+                    <span>Today Operator Plan</span>
+                    <strong>{profitCockpit.nextMove}</strong>
+                  </div>
+                  <div className="operator-actions">
+                    <button type="button" onClick={copyTodayPlan}>
+                      Copy plan
+                    </button>
+                    <button type="button" onClick={downloadProfitSprintPlan}>
+                      Profit sprint
+                    </button>
+                  </div>
+                </div>
+                <div className="operator-action-grid">
+                  {workdayActions.map((action, index) => (
+                    <article key={action.id} className={action.state}>
+                      <i>{String(index + 1).padStart(2, "0")}</i>
+                      <div>
+                        <strong>{action.label}</strong>
+                        <p>{action.detail}</p>
+                      </div>
+                      <button type="button" onClick={() => runOperatorAction(action)} disabled={action.disabled}>
+                        {action.cta}
+                      </button>
+                    </article>
+                  ))}
+                </div>
+              </div>
+            </section>
+
             {backgroundJob ? (
               <section className={`background-job-card wide ${backgroundJob.status}`} aria-label="Фоновый режим Money Machine">
                 <div className="job-status-grid">
@@ -1518,6 +1675,16 @@ function App() {
                   <span className={selectedMoneyLead.phone ? "ready" : "missing"}>Телефон</span>
                   <span className={selectedMoneyLead.email ? "ready" : "missing"}>Email</span>
                   <span className={selectedLeadLinks.map || selectedLeadLinks.osm ? "ready" : "missing"}>Карта</span>
+                </div>
+
+                <div className="deal-ladder" aria-label="Deal Automation Ladder">
+                  {selectedDealLadder.map((stage) => (
+                    <article key={stage.id} className={stage.state}>
+                      <span>{stage.label}</span>
+                      <strong>{stage.value}</strong>
+                      <p>{stage.detail}</p>
+                    </article>
+                  ))}
                 </div>
 
                 <div className="workbench-grid">
@@ -2528,6 +2695,197 @@ function summarizeAutomationStats(queue, moneyLeads) {
     ? Math.round(queue.reduce((sum, lead) => sum + buildOutreachQualityGate(ownerEmailForLead(lead), lead).score, 0) / queue.length)
     : 0;
   return { sendReady, withEmail, withGmail, avgQuality };
+}
+
+function buildProfitCockpit({ moneyLeads, dailySendQueue, crm, moneyPipeline, moneySettings, backgroundJob, selectedLead }) {
+  const pipelineValue = Number(moneyPipeline.oneTimeValue || 0);
+  const monthlyValue = Number(moneyPipeline.monthlyValue || 0);
+  const closeRate = Math.max(1, Number(moneySettings.closeRate || 12));
+  const sendReady = dailySendQueue.length;
+  const gmailReady = dailySendQueue.filter((lead) => buildGmailComposeUrl(lead)).length;
+  const focusLead = selectedLead || dailySendQueue[0] || moneyLeads[0] || null;
+  const expected7DayValue = Math.round(((pipelineValue + monthlyValue * 3) * closeRate) / 100);
+  const expectedPerSend = sendReady ? Math.round(expected7DayValue / Math.max(1, sendReady)) : 0;
+  const hot = moneyLeads.filter((lead) => lead.priority === "hot").length;
+  const sent = crm.filter((item) => /отправ|пис/i.test(String(item.status || ""))).length;
+  const activityScore = Math.min(100, sendReady * 8 + hot * 12 + sent * 4 + (backgroundJob ? 10 : 0));
+  const valueScore = Math.min(100, Math.round(expected7DayValue / 55));
+  const profitScore = Math.max(0, Math.min(100, Math.round(activityScore * 0.56 + valueScore * 0.44)));
+  const nextMove = sendReady
+    ? `Write ${Math.min(5, sendReady)} clean emails today`
+    : moneyLeads.length
+      ? "Find missing owner emails"
+      : backgroundJob
+        ? "Wait for background scan"
+        : "Run Money Machine";
+  return {
+    pipelineValue,
+    monthlyValue,
+    closeRate,
+    sendReady,
+    gmailReady,
+    focusLead,
+    expected7DayValue,
+    expectedPerSend,
+    profitScore,
+    nextMove,
+    statusLine: sendReady
+      ? `${sendReady} leads are ready for manual Gmail sending. Keep it controlled and track follow-up.`
+      : "Run a scan or enrich contacts until the daily send queue is ready.",
+    focusNote: focusLead
+      ? `${focusLead.priority || "lead"} · ${focusLead.serviceOffer?.name || "Conversion Sprint"}`
+      : "No selected lead yet"
+  };
+}
+
+function buildWorkdayActions({ moneyLeads, dailySendQueue, selectedLead, backgroundJob, profitCockpit }) {
+  const bestQueueLead = dailySendQueue[0];
+  const focusLead = selectedLead || bestQueueLead || moneyLeads[0];
+  return [
+    {
+      id: "scan",
+      label: backgroundJob && ["queued", "running"].includes(backgroundJob.status) ? "Scan is running" : "Fill the pipeline",
+      detail: backgroundJob
+        ? "Background mode keeps working server-side. Refresh job when you return."
+        : "Start a fresh global Money Machine scan with current niche and city settings.",
+      cta: backgroundJob && ["queued", "running"].includes(backgroundJob.status) ? "Running" : "Run scan",
+      state: backgroundJob ? backgroundJob.status : moneyLeads.length ? "done" : "active",
+      disabled: Boolean(backgroundJob && ["queued", "running"].includes(backgroundJob.status))
+    },
+    {
+      id: "gmail",
+      label: "Send the best draft",
+      detail: bestQueueLead
+        ? `${bestQueueLead.name} has a clean owner email and QA-ready first message.`
+        : "No send-ready lead yet. Find email contacts or run another scan.",
+      cta: "Open Gmail",
+      state: bestQueueLead ? "active" : "blocked",
+      disabled: !bestQueueLead,
+      leadId: bestQueueLead?.id
+    },
+    {
+      id: "sent",
+      label: "Track follow-up",
+      detail: bestQueueLead ? "Mark sent after Gmail, then follow-up is scheduled for 48h." : "Send a first email before scheduling follow-up.",
+      cta: "Mark sent",
+      state: bestQueueLead ? "active" : "blocked",
+      disabled: !bestQueueLead,
+      leadId: bestQueueLead?.id
+    },
+    {
+      id: "dossier",
+      label: "Prepare proof",
+      detail: focusLead ? `Copy the full brief for ${focusLead.name}.` : "Select a lead to prepare proof and close kit.",
+      cta: "Copy brief",
+      state: focusLead ? "ready" : "blocked",
+      disabled: !focusLead,
+      leadId: focusLead?.id
+    },
+    {
+      id: "plan",
+      label: "Copy operator plan",
+      detail: profitCockpit.nextMove,
+      cta: "Copy plan",
+      state: "ready",
+      disabled: false
+    },
+    {
+      id: "export",
+      label: "Export sprint",
+      detail: "Download a text plan with the money math, send queue, and next actions.",
+      cta: "Download",
+      state: "ready",
+      disabled: false
+    }
+  ];
+}
+
+function buildDealLadder(leadInput, qualityGate, crm) {
+  const lead = normalizeLead(leadInput || {});
+  const crmItem = crm.find((item) => item.id === `lead-${lead.id}`);
+  const sent = /отправ|пис/i.test(String(crmItem?.status || ""));
+  const probability = estimateLeadCloseProbability(lead, qualityGate, crmItem);
+  const expected = Math.round((Number(lead.estimatedDealValue || lead.serviceOffer?.price || 0) * probability) / 100);
+  return [
+    {
+      id: "qualify",
+      label: "Qualify",
+      value: lead.moneyScore ? `${lead.moneyScore}/100` : `${lead.score || 0}/100`,
+      detail: lead.email ? "Owner contact found" : "Needs owner email",
+      state: lead.email ? "done" : "active"
+    },
+    {
+      id: "draft",
+      label: "Draft",
+      value: `${qualityGate?.score || 0}/100`,
+      detail: qualityGate?.ready ? "Email QA passed" : "Fix owner message first",
+      state: qualityGate?.ready ? "done" : "active"
+    },
+    {
+      id: "send",
+      label: "Send",
+      value: sent ? "Sent" : "Manual",
+      detail: sent ? "48h follow-up armed" : "Open Gmail and send manually",
+      state: sent ? "done" : lead.email ? "active" : "blocked"
+    },
+    {
+      id: "close",
+      label: "Close",
+      value: moneyText(expected),
+      detail: `${probability}% probability estimate`,
+      state: sent ? "active" : "ready"
+    }
+  ];
+}
+
+function estimateLeadCloseProbability(leadInput, qualityGate, crmItem) {
+  const lead = normalizeLead(leadInput || {});
+  let probability = 8;
+  if (lead.priority === "hot") probability += 8;
+  if (lead.email) probability += 7;
+  if (lead.phone) probability += 3;
+  if (lead.websiteReachable === true) probability += 3;
+  if ((qualityGate?.score || 0) >= 90) probability += 6;
+  if (/отправ|пис/i.test(String(crmItem?.status || ""))) probability += 5;
+  if ((lead.moneyScore || 0) >= 80) probability += 5;
+  return Math.max(3, Math.min(42, probability));
+}
+
+function buildTodayPlanText(profitCockpit, actions, dailySendQueue) {
+  const queueLines = dailySendQueue.slice(0, 7).map((lead, index) => {
+    const gate = buildOutreachQualityGate(ownerEmailForLead(lead), lead);
+    return `${index + 1}. ${lead.name} — ${lead.email || "manual email"} — QA ${gate.score}/100 — ${lead.serviceOffer?.name || "Conversion Sprint"}`;
+  });
+  return [
+    "Today SiteMoney operator plan",
+    `Next move: ${profitCockpit.nextMove}`,
+    `Expected 7-day value: ${moneyText(profitCockpit.expected7DayValue)}`,
+    `Send-ready: ${profitCockpit.sendReady}`,
+    `Focus: ${profitCockpit.focusLead?.name || "none"}`,
+    "",
+    "Actions:",
+    ...actions.map((action, index) => `${index + 1}. ${action.label}: ${action.detail}`),
+    "",
+    "Send queue:",
+    ...(queueLines.length ? queueLines : ["No send-ready leads yet. Run Money Machine or enrich emails."])
+  ].join("\n");
+}
+
+function copyStatusLabel(value) {
+  const key = String(value || "");
+  if (key === "profit-cockpit-plan") return "Today operator plan copied";
+  if (key === "profit-sprint") return "Profit sprint file prepared";
+  if (key === "daily-plan") return "Daily send plan prepared";
+  if (key === "outreach-pack") return "Outreach pack prepared";
+  if (key.startsWith("gmail-")) return "Gmail draft opened";
+  if (key.startsWith("sent-")) return "Lead marked sent";
+  if (key.startsWith("dossier-")) return "Lead brief copied";
+  if (key.startsWith("sequence-")) return "Sequence step copied";
+  if (key.startsWith("closekit-")) return "Close kit copied";
+  if (key.startsWith("lead-")) return "Owner message copied";
+  if (key.startsWith("crm-") || key === "crm") return "CRM updated";
+  if (key.startsWith("save-")) return "Lead saved";
+  return "Action completed";
 }
 
 function buildReplyAssistant(replyText, leadInput) {

@@ -567,7 +567,12 @@ async function inspectFrontendBuild() {
     closeKit: "Close Kit",
     replyAssistant: "Reply Assistant",
     gmailDraft: "Gmail draft",
-    dailyPlan: "Daily plan"
+    dailyPlan: "Daily plan",
+    profitCockpit: "Profit Cockpit",
+    todayOperatorPlan: "Today Operator Plan",
+    profitScore: "profit score",
+    dealAutomationLadder: "Deal Automation Ladder",
+    profitSprint: "Profit sprint"
   };
 
   try {

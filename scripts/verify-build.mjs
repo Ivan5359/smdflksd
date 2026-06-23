@@ -33,7 +33,12 @@ const expectedMarkers = [
   "Close Kit",
   "Reply Assistant",
   "Gmail draft",
-  "Daily plan"
+  "Daily plan",
+  "Profit Cockpit",
+  "Today Operator Plan",
+  "profit score",
+  "Deal Automation Ladder",
+  "Profit sprint"
 ];
 
 const indexHtml = await fs.readFile(indexPath, "utf8");
