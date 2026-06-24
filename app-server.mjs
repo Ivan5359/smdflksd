@@ -777,7 +777,11 @@ async function inspectFrontendBuild() {
     parsePlan: "Parse plan",
     recipientsStatus: "Recipients & status",
     botApiPack: "Bot/API pack",
-    followUpTimeline: "Follow-up timeline"
+    followUpTimeline: "Follow-up timeline",
+    exportCampaignPack: "Export Campaign Pack",
+    campaignSafetyLimits: "Campaign safety & limits",
+    campaignStatus: "Campaign status",
+    approveReadyQueue: "Approve ready queue"
   };
 
   try {

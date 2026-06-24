@@ -195,6 +195,7 @@ function App() {
   const [copied, setCopied] = useState("");
   const [serverVersion, setServerVersion] = useState(APP_VERSION);
   const [replyText, setReplyText] = useState("");
+  const [currentHash, setCurrentHash] = useState(() => window.location.hash || "");
 
   useEffect(() => {
     fetch("/__version")
@@ -239,6 +240,7 @@ function App() {
 
   useEffect(() => {
     const scrollToHash = () => {
+      setCurrentHash(window.location.hash || "");
       const targetId = window.location.hash.replace("#", "");
       if (!targetId) return;
       window.setTimeout(() => {
@@ -1220,6 +1222,316 @@ function App() {
     }
   ];
 
+  if (currentHash === "#email-operator") {
+    const selectedSequence = selectedEmailOperatorLead?.operatorSequence || [];
+    const sentPercent = emailOperatorCampaign.stats.total
+      ? Math.round((emailOperatorCampaign.stats.sent / emailOperatorCampaign.stats.total) * 100)
+      : 0;
+    const readyPercent = emailOperatorCampaign.stats.total
+      ? Math.round((emailOperatorCampaign.stats.ready / emailOperatorCampaign.stats.total) * 100)
+      : 0;
+
+    return (
+      <div className="email-cockpit-shell">
+        <aside className="email-cockpit-sidebar" aria-label="Email Operator navigation">
+          <div className="email-cockpit-logo">
+            <div className="brand-mark" aria-hidden="true">
+              <Mail size={22} />
+            </div>
+            <div>
+              <strong>SiteMoney</strong>
+              <span>Audit</span>
+            </div>
+          </div>
+          <nav>
+            <a href="#automation">Cockpit</a>
+            <a href="#money-machine">Lead Machine</a>
+            <a href="#email-operator" className="active">Email Operator</a>
+            <a href="#deal">Deals</a>
+            <a href="#export">Reports</a>
+          </nav>
+          <div className="email-cockpit-sidecard">
+            <span>Plan limits</span>
+            <strong>{emailOperatorCampaign.stats.sent} / {emailOperatorSettings.dailyLimit}</strong>
+            <div className="mini-progress">
+              <i style={{ width: `${Math.min(100, sentPercent)}%` }} />
+            </div>
+            <p>Manual Gmail review. No blind mass-send.</p>
+          </div>
+          <div className="email-cockpit-sidecard connected">
+            <span>Account</span>
+            <strong>Gmail compose</strong>
+            <p>Replies come to the Gmail account you send from.</p>
+          </div>
+        </aside>
+
+        <main className="email-cockpit-main">
+          <header className="email-cockpit-topbar">
+            <div>
+              <span>Operator Mode</span>
+              <strong>Email Operator</strong>
+            </div>
+            <nav>
+              <a href="#money-machine">Money Machine</a>
+              <a href="#automation">Main app</a>
+            </nav>
+            <button type="button" className="primary-button" onClick={downloadEmailOperatorPack} disabled={!emailOperatorQueue.length}>
+              <Download size={15} />
+              Export Campaign Pack
+            </button>
+          </header>
+
+          {copied ? (
+            <div className="copy-toast cockpit-toast" role="status" aria-live="polite">
+              <Check size={15} />
+              <span>{copyStatusLabel(copied)}</span>
+            </div>
+          ) : null}
+
+          {error ? (
+            <div className="error-banner cockpit-error">
+              <AlertTriangle size={16} />
+              <span>{error}</span>
+            </div>
+          ) : null}
+
+          <section className="email-cockpit-hero">
+            <div>
+              <h1>Email Operator</h1>
+              <p>Daily Plan to Email Queue to Sends to Replies to Deals</p>
+            </div>
+            <div className="email-cockpit-metrics">
+              <article>
+                <span>Today plan</span>
+                <strong>{emailOperatorCampaign.stats.total}</strong>
+                <p>recipients</p>
+              </article>
+              <article>
+                <span>Ready to send</span>
+                <strong>{emailOperatorCampaign.stats.ready}</strong>
+                <p>emails</p>
+              </article>
+              <article>
+                <span>Sent today</span>
+                <strong>{emailOperatorCampaign.stats.sent}</strong>
+                <p>emails</p>
+              </article>
+              <article>
+                <span>Replies</span>
+                <strong>{emailOperatorCampaign.stats.replied}</strong>
+                <p>new</p>
+              </article>
+              <article>
+                <span>Follow-ups</span>
+                <strong>{emailOperatorCampaign.stats.followUps}</strong>
+                <p>due</p>
+              </article>
+            </div>
+          </section>
+
+          <section className="email-cockpit-workspace">
+            <div className="operator-import cockpit-panel">
+              <div className="operator-section-title">
+                <span>1</span>
+                <strong>Import Daily Plan</strong>
+              </div>
+              <p className="cockpit-panel-note">Paste Daily Plan, CSV, or a text list of businesses.</p>
+              <div className="cockpit-import-tabs">
+                <button type="button" className="active">Paste Plan</button>
+                <button type="button">CSV Upload</button>
+                <button type="button">Text File</button>
+              </div>
+              <textarea
+                value={emailOperatorInput}
+                onChange={(event) => setEmailOperatorInput(event.target.value)}
+                spellCheck="false"
+                aria-label="Daily Plan для Email Operator"
+              />
+              <div className="operator-button-row">
+                <button type="button" className="primary-button" onClick={parseEmailOperatorPlan}>
+                  <Sparkles size={15} />
+                  Parse Daily Plan
+                </button>
+                <button type="button" className="secondary-button" onClick={loadEmailOperatorFromMoneyMachine}>
+                  <Mail size={15} />
+                  From Money Machine
+                </button>
+                <button type="button" className="secondary-button" onClick={clearEmailOperator}>
+                  <Trash2 size={15} />
+                  Clear
+                </button>
+              </div>
+              <div className="operator-mini-metrics">
+                <span>{emailOperatorCampaign.stats.hasEmail} emails found</span>
+                <span>{emailOperatorCampaign.stats.blocked} need check</span>
+                <span>limit {emailOperatorSettings.dailyLimit}/day</span>
+              </div>
+            </div>
+
+            <div className="operator-recipients cockpit-panel">
+              <div className="operator-section-title">
+                <span>2</span>
+                <strong>Recipients & queue ({emailOperatorCampaign.stats.total})</strong>
+              </div>
+              <div className="cockpit-search-row">
+                <span>Search recipients...</span>
+                <button type="button">Filters</button>
+              </div>
+              <div className="recipient-list cockpit-recipient-list">
+                {emailOperatorQueue.map((lead, index) => (
+                  <button
+                    type="button"
+                    key={`standalone-operator-${lead.id}`}
+                    className={selectedEmailOperatorLead?.id === lead.id ? "selected" : ""}
+                    onClick={() => setEmailOperatorSelectedId(lead.id)}
+                  >
+                    <b>{index + 1}</b>
+                    <span>
+                      <strong>{lead.name}</strong>
+                      <small>{lead.email || "email missing"}</small>
+                    </span>
+                    <i className={operatorStatusClass(lead.operatorStatus)}>{operatorStatusLabel(lead.operatorStatus)}</i>
+                    <em>{lead.operatorQuality}</em>
+                  </button>
+                ))}
+                {!emailOperatorQueue.length ? <p className="empty-state">Paste Daily Plan or import from Money Machine.</p> : null}
+              </div>
+              <div className="cockpit-recipient-footer">
+                <span>{emailOperatorCampaign.stats.ready} selected</span>
+                <button type="button" className="primary-button" onClick={copyEmailOperatorCampaign} disabled={!emailOperatorQueue.length}>
+                  Approve ready queue
+                </button>
+              </div>
+            </div>
+
+            <div className="operator-preview cockpit-panel">
+              <div className="operator-section-title">
+                <span>3</span>
+                <strong>Email preview</strong>
+              </div>
+              {selectedEmailOperatorLead ? (
+                <>
+                  <div className="preview-meta">
+                    <span>To: {selectedEmailOperatorLead.email || "missing email"}</span>
+                    <span>QA {selectedEmailOperatorLead.operatorQuality}/100</span>
+                  </div>
+                  <div className="preview-subject">
+                    {selectedSequence[0]?.subject || `Website note for ${selectedEmailOperatorLead.name}`}
+                  </div>
+                  <pre className="operator-email-preview">
+                    {formatOperatorEmail(selectedSequence[0], emailOperatorSettings.signature)}
+                  </pre>
+                  <div className="operator-checklist">
+                    {(selectedEmailOperatorLead.operatorChecks || []).map((item) => (
+                      <span key={item.id} className={item.ok ? "ready" : "missing"}>
+                        {item.ok ? "✓" : "!"} {item.label}
+                      </span>
+                    ))}
+                  </div>
+                  <div className="operator-button-row">
+                    <button
+                      type="button"
+                      className="primary-button"
+                      onClick={() => openEmailOperatorGmail(selectedEmailOperatorLead)}
+                      disabled={!selectedEmailOperatorLead.email}
+                    >
+                      <Mail size={15} />
+                      Open in Gmail
+                    </button>
+                    <button type="button" className="secondary-button" onClick={() => copyEmailOperatorMessage(selectedEmailOperatorLead)}>
+                      <Copy size={15} />
+                      Copy
+                    </button>
+                    <button type="button" className="secondary-button" onClick={() => markEmailOperatorSent(selectedEmailOperatorLead)}>
+                      <Check size={15} />
+                      Sent
+                    </button>
+                  </div>
+                </>
+              ) : (
+                <p className="empty-state">Choose a recipient from the queue.</p>
+              )}
+            </div>
+          </section>
+
+          <section className="email-cockpit-bottom">
+            <div className="cockpit-panel timeline-panel">
+              <div className="operator-section-title">
+                <span>4</span>
+                <strong>Follow-up timeline</strong>
+              </div>
+              <div className="timeline-rail">
+                {(selectedSequence.length ? selectedSequence : [
+                  { id: "initial", day: 0, label: "Initial email" },
+                  { id: "followup_48h", day: 2, label: "Follow-up 1" },
+                  { id: "proof_note", day: 4, label: "Final proof note" }
+                ]).map((step, index) => (
+                  <article key={step.id || index} className={index === 0 ? "active" : ""}>
+                    <span>D+{step.day}</span>
+                    <strong>{step.label}</strong>
+                    <p>{index === 0 ? "Today" : "Planned"}</p>
+                  </article>
+                ))}
+              </div>
+              <button type="button" className="primary-button" onClick={() => selectedEmailOperatorLead && openEmailOperatorGmail(selectedEmailOperatorLead, "followup_48h")} disabled={!selectedEmailOperatorLead?.email}>
+                Generate Follow-Up
+              </button>
+            </div>
+
+            <div className="cockpit-panel campaign-limits-panel">
+              <div className="operator-section-title">
+                <span>5</span>
+                <strong>Campaign safety & limits</strong>
+              </div>
+              <label>
+                Daily limit
+                <input
+                  type="number"
+                  min="1"
+                  max="100"
+                  value={emailOperatorSettings.dailyLimit}
+                  onChange={(event) => updateEmailOperatorSettings("dailyLimit", event.target.value)}
+                />
+              </label>
+              <label>
+                Cooldown seconds
+                <input
+                  type="number"
+                  min="10"
+                  max="900"
+                  value={emailOperatorSettings.cooldownSeconds}
+                  onChange={(event) => updateEmailOperatorSettings("cooldownSeconds", event.target.value)}
+                />
+              </label>
+              <Toggle
+                label="Review before send"
+                checked={Boolean(emailOperatorSettings.requireApproval)}
+                onChange={(value) => updateEmailOperatorSettings("requireApproval", value)}
+              />
+            </div>
+
+            <div className="cockpit-panel campaign-status-panel">
+              <div className="operator-section-title">
+                <span>6</span>
+                <strong>Campaign status</strong>
+              </div>
+              <div className="status-bars">
+                <span>Ready <i style={{ width: `${readyPercent}%` }} /></span>
+                <span>Sent <i style={{ width: `${sentPercent}%` }} /></span>
+                <span>Replied <i style={{ width: `${emailOperatorCampaign.stats.replied ? 100 : 0}%` }} /></span>
+                <span>Not a fit <i style={{ width: `${emailOperatorCampaign.stats.skipped ? 100 : 0}%` }} /></span>
+              </div>
+              <div className="campaign-ring">
+                <strong>{emailOperatorCampaign.stats.total}</strong>
+                <span>Total leads</span>
+              </div>
+            </div>
+          </section>
+        </main>
+      </div>
+    );
+  }
+
   return (
     <div className="app-shell command-center">
       <header className="topbar">
@@ -1235,6 +1547,7 @@ function App() {
         <nav className="command-tabs" aria-label="Рабочие зоны">
           <a href="#automation">Автопилот</a>
           <a href="#money-machine">Money Machine</a>
+          <a href="#email-operator">Email Operator</a>
           <a href="#radar">Радар целей</a>
           <a href="#deal">Сделка</a>
           <a href="#export">Экспорт</a>

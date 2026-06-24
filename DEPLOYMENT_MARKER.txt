@@ -1,4 +1,4 @@
-GITHUB_ROOT_UPLOAD_SITEMONEY_AUDIT_20260624_EMAIL_OPERATOR
+GITHUB_ROOT_UPLOAD_SITEMONEY_AUDIT_20260624_EMAIL_OPERATOR_COCKPIT
 
 If Railway shows another version at /__version, it is not running this upload root.
 GitHub root must contain package.json, app-server.mjs, dist, src, scripts, and this marker file.

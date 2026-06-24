@@ -43,7 +43,11 @@ const expectedMarkers = [
   "Parse plan",
   "Recipients & status",
   "Bot/API pack",
-  "Follow-up timeline"
+  "Follow-up timeline",
+  "Export Campaign Pack",
+  "Campaign safety & limits",
+  "Campaign status",
+  "Approve ready queue"
 ];
 
 const indexHtml = await fs.readFile(indexPath, "utf8");
