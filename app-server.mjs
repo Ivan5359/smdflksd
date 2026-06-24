@@ -161,6 +161,15 @@ app.post("/api/lead-machine", async (request, response) => {
   }
 });
 
+app.post("/api/email-operator/parse", (request, response) => {
+  try {
+    const campaign = buildEmailOperatorApiCampaign(request.body || {});
+    response.json(campaign);
+  } catch (error) {
+    response.status(400).json({ ok: false, error: error.message || "Email operator parse failed" });
+  }
+});
+
 app.post("/api/lead-machine/jobs", async (request, response) => {
   try {
     const job = await startLeadMachineJob(request.body || {});
@@ -256,6 +265,197 @@ async function ensureFreshFrontendBuild() {
   }
   console.log("Frontend runtime rebuild verified.", rebuilt.checks);
   return rebuilt;
+}
+
+function buildEmailOperatorApiCampaign(input = {}) {
+  const dailyPlan = String(input.dailyPlan || input.plan || input.text || "");
+  const settings = {
+    dailyLimit: Math.max(1, Math.min(100, Number(input.dailyLimit || input.limit || 25))),
+    cooldownSeconds: Math.max(10, Math.min(900, Number(input.cooldownSeconds || 60))),
+    signature: String(input.signature || "Best,\nIvan Repkin\nSiteMoney Audit").trim()
+  };
+  const leads = parseEmailOperatorApiPlan(dailyPlan, {
+    city: input.city || "",
+    country: input.country || "",
+    niche: input.niche || "",
+    averageSale: input.averageSale || 500,
+    monthlyRetainer: input.monthlyRetainer || 120
+  }).slice(0, settings.dailyLimit);
+  const recipients = leads.map((lead, index) => {
+    const sequence = buildEmailOperatorApiSequence(lead, settings.signature);
+    const quality = scoreEmailOperatorApiMessage(lead, sequence[0]);
+    return {
+      rank: index + 1,
+      ...lead,
+      status: lead.email ? quality.ready ? "ready" : "review" : "blocked",
+      quality,
+      sequence,
+      gmailUrl: buildEmailOperatorApiGmailUrl(lead.email, sequence[0].subject, sequence[0].body)
+    };
+  });
+  return {
+    ok: true,
+    version: APP_VERSION,
+    mode: "email-operator-api",
+    stats: {
+      total: recipients.length,
+      ready: recipients.filter((item) => item.status === "ready").length,
+      blocked: recipients.filter((item) => item.status === "blocked").length,
+      dailyLimit: settings.dailyLimit,
+      cooldownSeconds: settings.cooldownSeconds
+    },
+    recipients,
+    safety: {
+      sending: "manual-gmail-compose",
+      rule: "Open each Gmail draft, review it, and send from the Gmail account you are logged into."
+    }
+  };
+}
+
+function parseEmailOperatorApiPlan(textInput, defaults = {}) {
+  const text = String(textInput || "");
+  const meta = extractEmailOperatorApiMeta(text, defaults);
+  const rows = text
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .filter((line) => !/^(daily plan|city:|country:|niche:|offer:|avg sale:|average sale:|monthly retainer:|retainer:)/i.test(line));
+  const seen = new Set();
+  const leads = [];
+  for (const row of rows) {
+    const email = (row.match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i) || [])[0] || "";
+    const website = extractEmailOperatorApiWebsite(row);
+    const clean = row
+      .replace(/^\s*(?:[-*•]|\d+[.)])\s*/, "")
+      .replace(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi, "")
+      .replace(/https?:\/\/\S+|www\.\S+|[a-z0-9-]+\.[a-z]{2,}(?:\/\S*)?/gi, "")
+      .replace(/^[—|:-]+|[—|:-]+$/g, "")
+      .trim();
+    const name = clean.split(/\s+[—|]\s+|\s+-\s+|,/)[0]?.trim() || businessNameFromEmailOperatorApiContact(website, email);
+    if (!name || (!email && !website)) continue;
+    const key = `${email}|${website}|${name}`.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    leads.push({
+      id: `operator-${stableEmailOperatorApiHash(key)}`,
+      name,
+      email,
+      website,
+      city: meta.city,
+      country: meta.country,
+      niche: meta.niche,
+      offer: meta.offer,
+      averageSale: meta.averageSale,
+      monthlyRetainer: meta.monthlyRetainer
+    });
+  }
+  return leads;
+}
+
+function extractEmailOperatorApiMeta(textInput, defaults = {}) {
+  const text = String(textInput || "");
+  const read = (label) => {
+    const match = text.match(new RegExp(`${label}\\s*:\\s*([^\\n\\r]+)`, "i"));
+    return match ? match[1].trim() : "";
+  };
+  const cityRaw = read("city");
+  const [cityPart, countryPart] = cityRaw.split(",").map((item) => item?.trim()).filter(Boolean);
+  return {
+    city: cityPart || defaults.city || "",
+    country: read("country") || countryPart || defaults.country || "",
+    niche: read("niche") || defaults.niche || "",
+    offer: read("offer") || "Quick Fix Plan",
+    averageSale: Number(String(read("avg sale") || read("average sale") || defaults.averageSale || 500).replace(/[^\d.]/g, "")) || 500,
+    monthlyRetainer: Number(String(read("monthly retainer") || read("retainer") || defaults.monthlyRetainer || 120).replace(/[^\d.]/g, "")) || 120
+  };
+}
+
+function buildEmailOperatorApiSequence(lead, signature) {
+  const host = lead.website ? new URL(lead.website).hostname.replace(/^www\./, "") : "your public listing";
+  const location = [lead.city, lead.country].filter(Boolean).join(", ");
+  const subject = `Small website fix for ${lead.name}`;
+  const initial = [
+    `Hi ${lead.name} team,`,
+    "",
+    `I found your business${location ? ` in ${location}` : ""}${lead.website ? ` and opened ${host}` : ""}. I noticed one practical thing worth checking: the request path could be easier for a customer who is ready to contact you.`,
+    "",
+    "I am not pitching a full redesign. The useful first step would be small and easy to judge: a short screenshot plan with the issue, the fix, and the first change I would make.",
+    "",
+    "Should I send the screenshot plan?",
+    "",
+    signature
+  ].join("\n");
+  return [
+    { id: "initial", day: 0, label: "Initial email", subject, body: initial },
+    {
+      id: "followup_48h",
+      day: 2,
+      label: "48h follow-up",
+      subject: `Re: ${subject}`,
+      body: [`Quick follow-up on ${lead.name}.`, "", "I can send the screenshot plan first so you can judge whether it is useful before talking about any work.", "", signature].join("\n")
+    },
+    {
+      id: "proof_note",
+      day: 4,
+      label: "Final proof note",
+      subject: `Screenshot note for ${lead.name}`,
+      body: ["Last note from me.", "", "If useful, I can send the screenshot note with the exact first fix. If not, I will close the loop here.", "", signature].join("\n")
+    }
+  ];
+}
+
+function scoreEmailOperatorApiMessage(lead, step) {
+  const text = `${step?.subject || ""}\n${step?.body || ""}`;
+  const checks = [
+    { id: "email", ok: Boolean(lead.email), label: "email present" },
+    { id: "subject", ok: Boolean(step?.subject), label: "subject present" },
+    { id: "personal", ok: text.includes(lead.name), label: "personalized" },
+    { id: "cta", ok: /Should I send|I can send/i.test(text), label: "soft CTA" },
+    { id: "safe", ok: !/guarantee|guaranteed|will make|missed demand|fastest revenue leak|exact 3 fixes|[А-Яа-яЁё]/i.test(text), label: "safe wording" }
+  ];
+  const score = Math.round((checks.filter((item) => item.ok).length / checks.length) * 100);
+  return { score, ready: score >= 80, checks };
+}
+
+function buildEmailOperatorApiGmailUrl(to, subject, body) {
+  if (!to) return "";
+  return `https://mail.google.com/mail/?view=cm&fs=1&to=${encodeURIComponent(to)}&su=${encodeURIComponent(subject || "")}&body=${encodeURIComponent(body || "")}`;
+}
+
+function extractEmailOperatorApiWebsite(line) {
+  const match = String(line || "").match(/https?:\/\/[^\s,;]+|www\.[^\s,;]+|[a-z0-9-]+\.[a-z]{2,}(?:\/[^\s,;]*)?/i);
+  if (!match) return "";
+  try {
+    const withProtocol = /^https?:\/\//i.test(match[0]) ? match[0] : `https://${match[0]}`;
+    const url = new URL(withProtocol);
+    return url.toString().replace(/\/$/, "");
+  } catch {
+    return "";
+  }
+}
+
+function businessNameFromEmailOperatorApiContact(website, email) {
+  const value = website || (email ? email.split("@")[1] : "");
+  try {
+    const host = new URL(/^https?:\/\//i.test(value) ? value : `https://${value}`).hostname.replace(/^www\./, "");
+    return host
+      .split(".")[0]
+      .split(/[-_]/)
+      .filter(Boolean)
+      .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+      .join(" ");
+  } catch {
+    return "Business";
+  }
+}
+
+function stableEmailOperatorApiHash(value) {
+  let hash = 0;
+  for (const char of String(value || "")) {
+    hash = (hash << 5) - hash + char.charCodeAt(0);
+    hash |= 0;
+  }
+  return Math.abs(hash).toString(36);
 }
 
 async function auditSingle(input) {
@@ -572,7 +772,12 @@ async function inspectFrontendBuild() {
     todayOperatorPlan: "Today Operator Plan",
     profitScore: "profit score",
     dealAutomationLadder: "Deal Automation Ladder",
-    profitSprint: "Profit sprint"
+    profitSprint: "Profit sprint",
+    emailOperator: "Email Operator",
+    parsePlan: "Parse plan",
+    recipientsStatus: "Recipients & status",
+    botApiPack: "Bot/API pack",
+    followUpTimeline: "Follow-up timeline"
   };
 
   try {

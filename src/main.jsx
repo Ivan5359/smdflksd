@@ -72,6 +72,21 @@ const defaultQueue = [
   "https://example.com"
 ].join("\n");
 
+const defaultEmailSignature = ["Best,", "Ivan Repkin", "SiteMoney Audit"].join("\n");
+
+const defaultEmailOperatorInput = [
+  "DAILY PLAN - paste your leads here",
+  "1. Brooklyn Plumbing Co - https://brooklynplumbingny.com - info@brooklynplumbingny.com",
+  "2. Queens HVAC Experts - https://queenshvac.com - info@queenshvac.com",
+  "3. Manhattan Electric Pros - https://manhattanelectric.com - hello@manhattanelectric.com",
+  "",
+  "City: New York, USA",
+  "Niche: Home Services",
+  "Offer: Quick Fix Plan",
+  "Avg Sale: $700",
+  "Monthly Retainer: $120"
+].join("\n");
+
 const defaultDiscoveryLocations = [
   "New York, USA",
   "London, United Kingdom",
@@ -150,6 +165,19 @@ function App() {
   });
   const [moneyMachine, setMoneyMachine] = useState(() => readInitialMoneyMachine());
   const [backgroundJob, setBackgroundJob] = useState(() => readInitialBackgroundJob());
+  const [emailOperatorInput, setEmailOperatorInput] = useState(() => readLocal("sitemoney.emailOperatorInput", defaultEmailOperatorInput));
+  const [emailOperatorLeads, setEmailOperatorLeads] = useState(() => readLocal("sitemoney.emailOperatorLeads", []));
+  const [emailOperatorStatuses, setEmailOperatorStatuses] = useState(() => readLocal("sitemoney.emailOperatorStatuses", {}));
+  const [emailOperatorSelectedId, setEmailOperatorSelectedId] = useState(() => readLocal("sitemoney.emailOperatorSelectedId", ""));
+  const [emailOperatorSettings, setEmailOperatorSettings] = useState(() =>
+    readLocal("sitemoney.emailOperatorSettings", {
+      dailyLimit: 25,
+      cooldownSeconds: 60,
+      requireApproval: true,
+      includeFollowUps: true,
+      signature: defaultEmailSignature
+    })
+  );
   const [leadFilter, setLeadFilter] = useState({
     query: "",
     onlyWebsite: false,
@@ -174,6 +202,26 @@ function App() {
       .then((payload) => setServerVersion(payload.version || APP_VERSION))
       .catch(() => setServerVersion(APP_VERSION));
   }, []);
+
+  useEffect(() => {
+    writeLocal("sitemoney.emailOperatorInput", emailOperatorInput);
+  }, [emailOperatorInput]);
+
+  useEffect(() => {
+    writeLocal("sitemoney.emailOperatorLeads", emailOperatorLeads);
+  }, [emailOperatorLeads]);
+
+  useEffect(() => {
+    writeLocal("sitemoney.emailOperatorStatuses", emailOperatorStatuses);
+  }, [emailOperatorStatuses]);
+
+  useEffect(() => {
+    writeLocal("sitemoney.emailOperatorSelectedId", emailOperatorSelectedId);
+  }, [emailOperatorSelectedId]);
+
+  useEffect(() => {
+    writeLocal("sitemoney.emailOperatorSettings", emailOperatorSettings);
+  }, [emailOperatorSettings]);
 
   useEffect(() => {
     if (!backgroundJob?.id || !["queued", "running"].includes(backgroundJob.status)) return undefined;
@@ -288,6 +336,21 @@ function App() {
   );
   const dailySendQueue = useMemo(() => buildDailySendQueue(moneyLeads, savedLeads), [moneyLeads, savedLeads]);
   const automationStats = useMemo(() => summarizeAutomationStats(dailySendQueue, moneyLeads), [dailySendQueue, moneyLeads]);
+  const emailOperatorCampaign = useMemo(
+    () =>
+      buildEmailOperatorCampaign({
+        importedLeads: emailOperatorLeads,
+        fallbackLeads: dailySendQueue,
+        statuses: emailOperatorStatuses,
+        settings: emailOperatorSettings
+      }),
+    [emailOperatorLeads, dailySendQueue, emailOperatorStatuses, emailOperatorSettings]
+  );
+  const emailOperatorQueue = emailOperatorCampaign.queue;
+  const selectedEmailOperatorLead = useMemo(
+    () => emailOperatorQueue.find((item) => item.id === emailOperatorSelectedId) || emailOperatorQueue[0] || null,
+    [emailOperatorQueue, emailOperatorSelectedId]
+  );
   const profitCockpit = useMemo(
     () =>
       buildProfitCockpit({
@@ -337,6 +400,126 @@ function App() {
 
   function updateMoneySettings(key, value) {
     setMoneySettings((current) => ({ ...current, [key]: value }));
+  }
+
+  function updateEmailOperatorSettings(key, value) {
+    setEmailOperatorSettings((current) => ({ ...current, [key]: value }));
+  }
+
+  function parseEmailOperatorPlan() {
+    const parsed = parseDailyPlanLeads(emailOperatorInput, {
+      niche: form.niche,
+      city: form.city,
+      country: "",
+      averageSale: form.averageSale,
+      monthlyRetainer: moneySettings.monthlyRetainer
+    });
+    if (!parsed.length) {
+      setError("Не нашел лиды в Daily Plan. Вставь строки вида: 1. Business - https://site.com - email@site.com");
+      return;
+    }
+    setEmailOperatorLeads(parsed);
+    setEmailOperatorSelectedId(parsed[0]?.id || "");
+    setCopied("operator-parse");
+    window.setTimeout(() => setCopied(""), 1400);
+  }
+
+  function loadEmailOperatorFromMoneyMachine() {
+    const source = dailySendQueue.length ? dailySendQueue : moneyLeads.filter((lead) => lead.email).slice(0, 12);
+    if (!source.length) {
+      setError("Сначала запусти Money Machine или вставь Daily Plan с email.");
+      return;
+    }
+    const imported = source.slice(0, 25).map((lead) => normalizeLead({ ...lead, source: "money-machine-import" }));
+    setEmailOperatorLeads(imported);
+    setEmailOperatorSelectedId(imported[0]?.id || "");
+    setCopied("operator-import");
+    window.setTimeout(() => setCopied(""), 1400);
+  }
+
+  function updateEmailOperatorStatus(leadInput, status, extra = {}) {
+    const lead = normalizeLead(leadInput || {});
+    if (!lead.id) return;
+    setEmailOperatorStatuses((current) => ({
+      ...current,
+      [lead.id]: {
+        ...(current[lead.id] || {}),
+        status,
+        updatedAt: new Date().toISOString(),
+        ...extra
+      }
+    }));
+  }
+
+  function openEmailOperatorGmail(leadInput, stepId = "initial") {
+    const lead = normalizeLead(leadInput || {});
+    const step = buildOutreachSequence(lead).find((item) => item.id === stepId) || buildOutreachSequence(lead)[0];
+    const url = buildOperatorGmailComposeUrl(lead, step, emailOperatorSettings.signature);
+    if (!url) {
+      setError("У этого лида нет email. Добавь email в Daily Plan или выбери другого получателя.");
+      return;
+    }
+    window.open(url, "_blank", "noopener,noreferrer");
+    updateEmailOperatorStatus(lead, "opened", { openedAt: new Date().toISOString(), stepId });
+    addBusinessToCrm({ ...lead, crmStatus: stepId === "initial" ? "Gmail открыт" : "Follow-up открыт" });
+    setCopied(`operator-gmail-${lead.id}`);
+    window.setTimeout(() => setCopied(""), 1400);
+  }
+
+  function markEmailOperatorSent(leadInput) {
+    const lead = normalizeLead(leadInput || {});
+    updateEmailOperatorStatus(lead, "sent", {
+      sentAt: new Date().toISOString(),
+      nextFollowUpAt: new Date(Date.now() + 48 * 60 * 60 * 1000).toISOString()
+    });
+    markLeadSent(lead);
+  }
+
+  async function copyEmailOperatorMessage(leadInput, stepId = "initial") {
+    const lead = normalizeLead(leadInput || {});
+    const step = buildOutreachSequence(lead).find((item) => item.id === stepId) || buildOutreachSequence(lead)[0];
+    await copyText(`operator-message-${lead.id}-${stepId}`, formatOperatorEmail(step, emailOperatorSettings.signature));
+  }
+
+  async function copyEmailOperatorCampaign() {
+    await copyText("operator-campaign", buildEmailOperatorPack(emailOperatorQueue, emailOperatorSettings));
+  }
+
+  function downloadEmailOperatorPack() {
+    const pack = buildEmailOperatorPack(emailOperatorQueue, emailOperatorSettings);
+    downloadBlob(new Blob([pack], { type: "text/plain;charset=utf-8" }), "sitemoney-email-operator-pack.txt");
+    setCopied("operator-pack");
+    window.setTimeout(() => setCopied(""), 1400);
+  }
+
+  function downloadEmailOperatorCsv() {
+    const rows = [
+      ["name", "email", "website", "city", "country", "status", "quality", "subject", "gmail_url", "follow_up_day"],
+      ...emailOperatorQueue.map((item) => [
+        item.name,
+        item.email,
+        item.website,
+        item.city,
+        item.country,
+        item.operatorStatus,
+        item.operatorQuality,
+        item.operatorSequence[0]?.subject || "",
+        buildOperatorGmailComposeUrl(item, item.operatorSequence[0], emailOperatorSettings.signature),
+        item.operatorSequence[1]?.day ?? 2
+      ])
+    ];
+    downloadBlob(new Blob([toCsv(rows)], { type: "text/csv;charset=utf-8" }), "sitemoney-email-operator.csv");
+    setCopied("operator-csv");
+    window.setTimeout(() => setCopied(""), 1400);
+  }
+
+  function clearEmailOperator() {
+    setEmailOperatorLeads([]);
+    setEmailOperatorStatuses({});
+    setEmailOperatorSelectedId("");
+    removeLocal("sitemoney.emailOperatorLeads");
+    removeLocal("sitemoney.emailOperatorStatuses");
+    removeLocal("sitemoney.emailOperatorSelectedId");
   }
 
   function applyNichePreset(preset) {
@@ -1628,6 +1811,236 @@ function App() {
               </div>
             </section>
 
+            <section className="email-operator-panel" id="email-operator" aria-label="Email Operator">
+              <div className="email-operator-head">
+                <div>
+                  <span>Email Operator</span>
+                  <h3>Daily Plan → Gmail queue → Follow-up</h3>
+                  <p>Вставь 6-25 лидов, проверь письма, открой Gmail по одному клику и веди статусы без хаоса.</p>
+                </div>
+                <div className="operator-statline">
+                  <div>
+                    <strong>{emailOperatorCampaign.stats.total}</strong>
+                    <span>recipients</span>
+                  </div>
+                  <div>
+                    <strong>{emailOperatorCampaign.stats.ready}</strong>
+                    <span>ready</span>
+                  </div>
+                  <div>
+                    <strong>{emailOperatorCampaign.stats.sent}</strong>
+                    <span>sent</span>
+                  </div>
+                  <div>
+                    <strong>{emailOperatorCampaign.stats.followUps}</strong>
+                    <span>follow-ups</span>
+                  </div>
+                </div>
+              </div>
+
+              <div className="email-operator-grid">
+                <section className="operator-import">
+                  <div className="operator-section-title">
+                    <span>1</span>
+                    <strong>Import Daily Plan</strong>
+                  </div>
+                  <textarea
+                    value={emailOperatorInput}
+                    onChange={(event) => setEmailOperatorInput(event.target.value)}
+                    spellCheck="false"
+                    aria-label="Daily Plan для Email Operator"
+                  />
+                  <div className="operator-button-row">
+                    <button type="button" className="primary-button" onClick={parseEmailOperatorPlan}>
+                      <Sparkles size={15} />
+                      Parse plan
+                    </button>
+                    <button type="button" className="secondary-button" onClick={loadEmailOperatorFromMoneyMachine}>
+                      <Mail size={15} />
+                      From Money Machine
+                    </button>
+                    <button type="button" className="secondary-button" onClick={clearEmailOperator}>
+                      <Trash2 size={15} />
+                      Clear
+                    </button>
+                  </div>
+                  <div className="operator-mini-metrics">
+                    <span>{emailOperatorCampaign.stats.hasEmail} emails found</span>
+                    <span>{emailOperatorCampaign.stats.blocked} need check</span>
+                    <span>limit {emailOperatorSettings.dailyLimit}/day</span>
+                  </div>
+                </section>
+
+                <section className="operator-recipients">
+                  <div className="operator-section-title">
+                    <span>2</span>
+                    <strong>Recipients & status</strong>
+                  </div>
+                  <div className="recipient-list">
+                    {emailOperatorQueue.map((lead, index) => (
+                      <button
+                        type="button"
+                        key={`operator-${lead.id}`}
+                        className={selectedEmailOperatorLead?.id === lead.id ? "selected" : ""}
+                        onClick={() => setEmailOperatorSelectedId(lead.id)}
+                      >
+                        <b>{index + 1}</b>
+                        <span>
+                          <strong>{lead.name}</strong>
+                          <small>{lead.email || "email missing"}</small>
+                        </span>
+                        <i className={operatorStatusClass(lead.operatorStatus)}>{operatorStatusLabel(lead.operatorStatus)}</i>
+                        <em>{lead.operatorQuality}</em>
+                      </button>
+                    ))}
+                    {!emailOperatorQueue.length ? (
+                      <p className="empty-state">Вставь Daily Plan или импортируй очередь из Money Machine.</p>
+                    ) : null}
+                  </div>
+                </section>
+
+                <section className="operator-preview">
+                  <div className="operator-section-title">
+                    <span>3</span>
+                    <strong>Email preview</strong>
+                  </div>
+                  {selectedEmailOperatorLead ? (
+                    <>
+                      <div className="preview-meta">
+                        <span>To: {selectedEmailOperatorLead.email || "missing email"}</span>
+                        <span>QA {selectedEmailOperatorLead.operatorQuality}/100</span>
+                      </div>
+                      <div className="preview-subject">
+                        {selectedEmailOperatorLead.operatorSequence[0]?.subject || `Website note for ${selectedEmailOperatorLead.name}`}
+                      </div>
+                      <pre className="operator-email-preview">
+                        {formatOperatorEmail(selectedEmailOperatorLead.operatorSequence[0], emailOperatorSettings.signature)}
+                      </pre>
+                      <div className="operator-checklist">
+                        {(selectedEmailOperatorLead.operatorChecks || []).map((item) => (
+                          <span key={item.id} className={item.ok ? "ready" : "missing"}>
+                            {item.ok ? "✓" : "!"} {item.label}
+                          </span>
+                        ))}
+                      </div>
+                      <div className="operator-button-row">
+                        <button
+                          type="button"
+                          className="primary-button"
+                          onClick={() => openEmailOperatorGmail(selectedEmailOperatorLead)}
+                          disabled={!selectedEmailOperatorLead.email}
+                        >
+                          <Mail size={15} />
+                          Open Gmail
+                        </button>
+                        <button type="button" className="secondary-button" onClick={() => copyEmailOperatorMessage(selectedEmailOperatorLead)}>
+                          <Copy size={15} />
+                          Copy email
+                        </button>
+                        <button type="button" className="secondary-button" onClick={() => markEmailOperatorSent(selectedEmailOperatorLead)}>
+                          <Check size={15} />
+                          Mark sent
+                        </button>
+                        <button
+                          type="button"
+                          className="secondary-button"
+                          onClick={() => openEmailOperatorGmail(selectedEmailOperatorLead, "followup_48h")}
+                          disabled={!selectedEmailOperatorLead.email}
+                        >
+                          <Send size={15} />
+                          Follow-up
+                        </button>
+                        <button
+                          type="button"
+                          className="secondary-button"
+                          onClick={() => updateEmailOperatorStatus(selectedEmailOperatorLead, "replied", { repliedAt: new Date().toISOString() })}
+                        >
+                          <Check size={15} />
+                          Replied
+                        </button>
+                        <button
+                          type="button"
+                          className="secondary-button"
+                          onClick={() => updateEmailOperatorStatus(selectedEmailOperatorLead, "skipped", { skippedAt: new Date().toISOString() })}
+                        >
+                          <Trash2 size={15} />
+                          Skip
+                        </button>
+                      </div>
+                    </>
+                  ) : (
+                    <p className="empty-state">Выбери получателя из очереди.</p>
+                  )}
+                </section>
+              </div>
+
+              <div className="operator-automation-strip">
+                <section>
+                  <span>Bot/API pack</span>
+                  <strong>Campaign JSON-ready</strong>
+                  <p>Тот же формат можно использовать Telegram-ботом: Daily Plan на входе, очередь писем и статусы на выходе.</p>
+                </section>
+                <section>
+                  <span>Safety limits</span>
+                  <label>
+                    Daily limit
+                    <input
+                      type="number"
+                      min="1"
+                      max="100"
+                      value={emailOperatorSettings.dailyLimit}
+                      onChange={(event) => updateEmailOperatorSettings("dailyLimit", event.target.value)}
+                    />
+                  </label>
+                  <label>
+                    Cooldown sec
+                    <input
+                      type="number"
+                      min="10"
+                      max="900"
+                      value={emailOperatorSettings.cooldownSeconds}
+                      onChange={(event) => updateEmailOperatorSettings("cooldownSeconds", event.target.value)}
+                    />
+                  </label>
+                  <Toggle
+                    label="Review before send"
+                    checked={Boolean(emailOperatorSettings.requireApproval)}
+                    onChange={(value) => updateEmailOperatorSettings("requireApproval", value)}
+                  />
+                </section>
+                <section className="operator-signature">
+                  <span>Signature</span>
+                  <textarea
+                    value={emailOperatorSettings.signature}
+                    onChange={(event) => updateEmailOperatorSettings("signature", event.target.value)}
+                    aria-label="Email signature"
+                  />
+                </section>
+                <section>
+                  <span>Campaign actions</span>
+                  <div className="operator-button-row">
+                    <button type="button" className="secondary-button" onClick={copyEmailOperatorCampaign} disabled={!emailOperatorQueue.length}>
+                      <Copy size={15} />
+                      Copy pack
+                    </button>
+                    <button type="button" className="secondary-button" onClick={downloadEmailOperatorPack} disabled={!emailOperatorQueue.length}>
+                      <Download size={15} />
+                      TXT
+                    </button>
+                    <button type="button" className="secondary-button" onClick={downloadEmailOperatorCsv} disabled={!emailOperatorQueue.length}>
+                      <Download size={15} />
+                      CSV
+                    </button>
+                  </div>
+                </section>
+                <section>
+                  <span>Follow-up timeline</span>
+                  <strong>Day 0 → Day 2 → Day 4</strong>
+                  <p>Initial email, polite 48h follow-up, final screenshot/proof note, then stop.</p>
+                </section>
+              </div>
+            </section>
+
             {selectedMoneyLead ? (
               <section className="lead-workbench" aria-label="Lead Workbench">
                 <div className="workbench-main">
@@ -2667,6 +3080,224 @@ function summarizeAutomationStats(queue, moneyLeads) {
     ? Math.round(queue.reduce((sum, lead) => sum + buildOutreachQualityGate(ownerEmailForLead(lead), lead).score, 0) / queue.length)
     : 0;
   return { sendReady, withEmail, withGmail, avgQuality };
+}
+
+function parseDailyPlanLeads(textInput, defaults = {}) {
+  const text = String(textInput || "");
+  const meta = extractDailyPlanMeta(text, defaults);
+  const rows = text
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .filter((line) => !/^(daily plan|city:|country:|niche:|offer:|avg sale:|average sale:|monthly retainer:|retainer:)/i.test(line));
+  const seen = new Set();
+  const leads = [];
+  for (const row of rows) {
+    const email = (row.match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i) || [])[0] || "";
+    const website = extractWebsiteFromLine(row);
+    const phone = (row.match(/(?:\+?\d[\d\s().-]{7,}\d)/) || [])[0] || "";
+    const numbered = row.replace(/^\s*(?:[-*•]|\d+[.)])\s*/, "");
+    const withoutContacts = numbered
+      .replace(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi, "")
+      .replace(/https?:\/\/\S+|www\.\S+|[a-z0-9-]+\.[a-z]{2,}(?:\/\S*)?/gi, "")
+      .replace(/\s+[—|-]\s*$/g, "")
+      .trim();
+    const name = cleanBusinessName(withoutContacts.split(/\s+[—|]\s+|\s+-\s+|,/)[0]) || businessNameFromWebsiteOrEmail(website, email);
+    if (!name || (!email && !website && !phone)) continue;
+    const key = `${email || ""}|${website || ""}|${name}`.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    const dealValue = Number(meta.averageSale || defaults.averageSale || 500);
+    const recurringValue = Number(meta.monthlyRetainer || defaults.monthlyRetainer || 120);
+    leads.push(
+      normalizeLead({
+        id: `operator-${stableHash(key)}`,
+        name,
+        email,
+        website,
+        phone,
+        city: meta.city || defaults.city || "",
+        country: meta.country || defaults.country || "",
+        niche: meta.niche || defaults.niche || "",
+        score: email ? 74 : 52,
+        moneyScore: email && website ? 78 : email ? 66 : 44,
+        priority: email && website ? "ready" : "needs-contact",
+        contactRoute: email ? "email" : phone ? "phone" : "website",
+        estimatedDealValue: dealValue,
+        recurringValue,
+        moneyOpportunity: dealValue * 4,
+        serviceOffer: {
+          name: meta.offer || "Quick Fix Plan",
+          price: Math.max(220, Math.round(dealValue * 0.65)),
+          monthly: recurringValue
+        },
+        topPriority: website ? "one small website conversion fix" : "clear website/contact path",
+        opportunity: website ? "one small website conversion fix" : "clear website/contact path",
+        evidence: ["Imported from Daily Plan", email ? "Email present" : "Email needs check", website ? "Website present" : "Website missing"],
+        source: "email-operator-daily-plan"
+      })
+    );
+  }
+  return leads.slice(0, 80);
+}
+
+function extractDailyPlanMeta(textInput, defaults = {}) {
+  const text = String(textInput || "");
+  const lineValue = (label) => {
+    const match = text.match(new RegExp(`${label}\\s*:\\s*([^\\n\\r]+)`, "i"));
+    return match ? match[1].trim() : "";
+  };
+  const cityRaw = lineValue("city");
+  const [cityPart, countryPart] = cityRaw.split(",").map((item) => item?.trim()).filter(Boolean);
+  return {
+    city: cityPart || defaults.city || "",
+    country: lineValue("country") || countryPart || defaults.country || "",
+    niche: lineValue("niche") || defaults.niche || "",
+    offer: lineValue("offer") || "Quick Fix Plan",
+    averageSale: parseMoneyNumber(lineValue("avg sale") || lineValue("average sale") || defaults.averageSale),
+    monthlyRetainer: parseMoneyNumber(lineValue("monthly retainer") || lineValue("retainer") || defaults.monthlyRetainer)
+  };
+}
+
+function extractWebsiteFromLine(line) {
+  const match = String(line || "").match(/https?:\/\/[^\s,;]+|www\.[^\s,;]+|[a-z0-9-]+\.[a-z]{2,}(?:\/[^\s,;]*)?/i);
+  if (!match) return "";
+  return safeExternalUrl(match[0]).replace(/\/$/, "");
+}
+
+function businessNameFromWebsiteOrEmail(website, email) {
+  const source = website || (email ? email.split("@")[1] : "");
+  const host = safeHost(source).replace(/^www\./, "").split(".")[0];
+  return host
+    .split(/[-_]/)
+    .filter(Boolean)
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(" ");
+}
+
+function cleanBusinessName(value) {
+  return String(value || "")
+    .replace(/^business\s*:/i, "")
+    .replace(/\s{2,}/g, " ")
+    .replace(/^[—|:-]+|[—|:-]+$/g, "")
+    .trim()
+    .slice(0, 90);
+}
+
+function parseMoneyNumber(value) {
+  const number = Number(String(value || "").replace(/[^\d.]/g, ""));
+  return Number.isFinite(number) ? number : 0;
+}
+
+function stableHash(value) {
+  let hash = 0;
+  const text = String(value || "");
+  for (let index = 0; index < text.length; index += 1) {
+    hash = (hash << 5) - hash + text.charCodeAt(index);
+    hash |= 0;
+  }
+  return Math.abs(hash).toString(36);
+}
+
+function buildEmailOperatorCampaign({ importedLeads, fallbackLeads, statuses, settings }) {
+  const source = (Array.isArray(importedLeads) && importedLeads.length ? importedLeads : fallbackLeads || []).map(normalizeLead);
+  const dailyLimit = Math.max(1, Number(settings?.dailyLimit || 25));
+  const queue = source.slice(0, dailyLimit).map((lead) => {
+    const sequence = buildOutreachSequence(lead);
+    const gate = buildOutreachQualityGate(sequence[0]?.body || ownerEmailForLead(lead), lead);
+    const stored = statuses?.[lead.id] || {};
+    const status = stored.status || (!lead.email ? "blocked" : gate.ready ? "ready" : "review");
+    return {
+      ...lead,
+      operatorStatus: status,
+      operatorStatusUpdatedAt: stored.updatedAt || "",
+      operatorNextFollowUpAt: stored.nextFollowUpAt || "",
+      operatorQuality: gate.score,
+      operatorChecks: gate.checks,
+      operatorSequence: sequence
+    };
+  });
+  const count = (status) => queue.filter((lead) => lead.operatorStatus === status).length;
+  const stats = {
+    total: queue.length,
+    hasEmail: queue.filter((lead) => lead.email).length,
+    ready: queue.filter((lead) => ["ready", "opened"].includes(lead.operatorStatus)).length,
+    opened: count("opened"),
+    sent: count("sent"),
+    replied: count("replied"),
+    skipped: count("skipped"),
+    blocked: queue.filter((lead) => ["blocked", "review"].includes(lead.operatorStatus)).length,
+    followUps: queue.filter((lead) => lead.operatorStatus === "sent" && lead.operatorNextFollowUpAt).length
+  };
+  return { queue, stats };
+}
+
+function formatOperatorEmail(stepInput, signature = defaultEmailSignature) {
+  const step = stepInput || {};
+  const body = stripSubjectLine(step.body || "");
+  const safeSignature = String(signature || "").trim();
+  if (!safeSignature || /(^|\n)\s*(best|regards|thanks),?\s*\n/i.test(body) || /Ivan Repkin/i.test(body)) return body;
+  return `${body.trim()}\n\n${safeSignature}`;
+}
+
+function buildOperatorGmailComposeUrl(leadInput, stepInput, signature) {
+  const lead = normalizeLead(leadInput || {});
+  if (!lead.email) return "";
+  const step = stepInput || buildOutreachSequence(lead)[0];
+  const subject = step?.subject || lead.outreach?.subject || `Website note for ${lead.name}`;
+  const body = formatOperatorEmail(step, signature);
+  return `https://mail.google.com/mail/?view=cm&fs=1&to=${encodeURIComponent(lead.email)}&su=${encodeURIComponent(stripSubjectPrefix(subject))}&body=${encodeURIComponent(body)}`;
+}
+
+function buildEmailOperatorPack(queue, settings = {}) {
+  const lines = [
+    "SiteMoney Email Operator Campaign",
+    `Generated: ${new Date().toISOString()}`,
+    `Daily limit: ${settings.dailyLimit || 25}`,
+    `Cooldown: ${settings.cooldownSeconds || 60}s`,
+    "",
+    "Safety rule: open each Gmail draft, review it, then send manually from your Gmail account.",
+    ""
+  ];
+  queue.forEach((lead, index) => {
+    const first = lead.operatorSequence?.[0] || buildOutreachSequence(lead)[0];
+    const follow = lead.operatorSequence?.[1] || buildOutreachSequence(lead)[1];
+    lines.push(
+      `#${index + 1} ${lead.name}`,
+      `Email: ${lead.email || "missing"}`,
+      `Website: ${lead.website || "manual check"}`,
+      `Status: ${operatorStatusLabel(lead.operatorStatus)} | QA: ${lead.operatorQuality}/100`,
+      `Subject: ${first?.subject || ""}`,
+      "",
+      formatOperatorEmail(first, settings.signature),
+      "",
+      `Follow-up D+${follow?.day ?? 2}:`,
+      formatOperatorEmail(follow, settings.signature),
+      "",
+      "---",
+      ""
+    );
+  });
+  return lines.join("\n");
+}
+
+function operatorStatusLabel(status) {
+  if (status === "ready") return "Ready";
+  if (status === "opened") return "Opened";
+  if (status === "sent") return "Sent";
+  if (status === "replied") return "Replied";
+  if (status === "skipped") return "Skip";
+  if (status === "blocked") return "No email";
+  if (status === "review") return "Review";
+  return "New";
+}
+
+function operatorStatusClass(status) {
+  if (["ready", "opened"].includes(status)) return "ready";
+  if (status === "sent") return "sent";
+  if (status === "replied") return "replied";
+  if (["blocked", "review"].includes(status)) return "missing";
+  return "";
 }
 
 function buildProfitCockpit({ moneyLeads, dailySendQueue, crm, moneyPipeline, moneySettings, backgroundJob, selectedLead }) {

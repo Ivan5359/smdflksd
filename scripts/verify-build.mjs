@@ -38,7 +38,12 @@ const expectedMarkers = [
   "Today Operator Plan",
   "profit score",
   "Deal Automation Ladder",
-  "Profit sprint"
+  "Profit sprint",
+  "Email Operator",
+  "Parse plan",
+  "Recipients & status",
+  "Bot/API pack",
+  "Follow-up timeline"
 ];
 
 const indexHtml = await fs.readFile(indexPath, "utf8");
