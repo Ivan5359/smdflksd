@@ -496,14 +496,16 @@ async function auditSingle(input) {
 }
 
 async function executeLeadMachine(input = {}, onProgress = null) {
+  const machine = normalizeLeadMachinePayload(input || {});
+  const expandedLimit = Math.min(100, Math.max(45, machine.maxLeads * 3 + machine.excludeLeadKeys.size));
   const payload = normalizeDiscoveryPayload({
     ...input,
     auditFound: input?.auditFound !== false,
-    limit: input?.limit || 45,
+    limit: input?.limit || expandedLimit,
     auditLimit: input?.auditLimit || 10,
-    locationLimit: input?.locationLimit || 8
+    locationLimit: input?.locationLimit || 8,
+    requireWebsite: Boolean(input.requireWebsite || machine.requireWebsite || machine.requireWorkingWebsite)
   });
-  const machine = normalizeLeadMachinePayload(input || {});
   await reportProgress(onProgress, {
     phase: "prepare",
     message: "Готовлю фоновый поиск бизнесов",
@@ -522,10 +524,18 @@ async function executeLeadMachine(input = {}, onProgress = null) {
     audited: discovery.reports.length
   });
 
-  const leads = buildMoneyMachineLeads(discovery.businesses, discovery.reports, payload, machine)
-    .filter((lead) => lead.moneyScore >= machine.minMoneyScore)
+  const allLeads = buildMoneyMachineLeads(discovery.businesses, discovery.reports, payload, machine);
+  const filteredLeads = applyMoneyMachineFilters(allLeads, machine);
+  const leads = filteredLeads
     .slice(0, machine.maxLeads);
   const pipeline = summarizeMoneyPipeline(leads);
+  const excludedCount = allLeads.length - filteredLeads.length;
+  const filterWarnings = [];
+  if (excludedCount > 0) filterWarnings.push(`Фильтры скрыли ${excludedCount} повторных или неподходящих лидов.`);
+  if (!leads.length && allLeads.length) {
+    filterWarnings.push("Новых лидов под текущие фильтры нет. Расширь города, снизь min score или отключи пропуск уже найденных.");
+  }
+  const { excludeLeadKeys, ...publicMachine } = machine;
 
   await reportProgress(onProgress, {
     phase: "completed",
@@ -540,11 +550,13 @@ async function executeLeadMachine(input = {}, onProgress = null) {
     version: APP_VERSION,
     source: "openstreetmap-overpass",
     generatedAt: new Date().toISOString(),
-    query: { ...payload, ...machine },
+    query: { ...payload, ...publicMachine, excludeLeadKeyCount: excludeLeadKeys.size },
     searchedLocations: discovery.locations.map((item) => item.label),
-    warnings: discovery.warnings,
+    warnings: [...discovery.warnings, ...filterWarnings],
     totals: {
       found: discovery.rawBusinesses.length,
+      candidate: allLeads.length,
+      filteredOut: excludedCount,
       ranked: leads.length,
       withWebsite: leads.filter((lead) => lead.website && lead.websiteReachable !== false).length,
       workingWebsite: leads.filter((lead) => lead.websiteReachable === true).length,
@@ -750,6 +762,12 @@ async function inspectFrontendBuild() {
     geoPreset: "USA money",
     moneyMachine: "Money Machine",
     runMoneyMachine: "Запустить money machine",
+    moneyFilters: "Фильтры Money Machine",
+    moneyOnlyEmail: "Только email",
+    moneyWorkingSite: "Рабочий сайт",
+    moneyNoRepeat: "Не повторять",
+    moneyFreshRotation: "Свежая ротация",
+    moneyFilteredOut: "Отфильтровано",
     hotLeads: "Горячие лиды",
     leadWorkbench: "Lead Workbench",
     backgroundMode: "Фоновый режим",
@@ -1147,8 +1165,27 @@ function normalizeLeadMachinePayload(input) {
     maxLeads: clampNumber(input.maxLeads || input.leadLimit, 5, 80, 30),
     minMoneyScore: clampNumber(input.minMoneyScore, 0, 100, 45),
     monthlyRetainer: clampNumber(input.monthlyRetainer, 0, 5000, 180),
-    closeRate: clampNumber(input.closeRate, 1, 100, 12)
+    closeRate: clampNumber(input.closeRate, 1, 100, 12),
+    requireEmail: Boolean(input.requireEmail),
+    requireWebsite: Boolean(input.requireWebsite),
+    requireWorkingWebsite: Boolean(input.requireWorkingWebsite),
+    excludeSeen: input.excludeSeen !== false,
+    rotateResults: input.rotateResults !== false,
+    sortMode: ["money", "score", "deal", "fresh"].includes(String(input.sortMode || input.moneySort || "money"))
+      ? String(input.sortMode || input.moneySort || "money")
+      : "money",
+    rotationSeed: String(input.rotationSeed || input.runId || Date.now()),
+    excludeLeadKeys: normalizeExcludeLeadKeys(input.excludeLeadKeys || input.excludeKeys || input.seenLeadKeys || [])
   };
+}
+
+function normalizeExcludeLeadKeys(value) {
+  const values = Array.isArray(value)
+    ? value
+    : String(value || "")
+        .split(/\r?\n|,|;/)
+        .map((item) => item.trim());
+  return new Set(values.flatMap((item) => leadKeyVariants({ id: item, website: item, email: item, name: item })));
 }
 
 async function resolveLocations(payload) {
@@ -1426,6 +1463,87 @@ function buildMoneyMachineLeads(businesses, reports, payload, machine) {
       if (b.moneyScore !== a.moneyScore) return b.moneyScore - a.moneyScore;
       return b.estimatedDealValue - a.estimatedDealValue;
     });
+}
+
+function applyMoneyMachineFilters(leads, machine) {
+  const seen = new Set();
+  const filtered = leads.filter((lead) => {
+    if ((lead.moneyScore || 0) < machine.minMoneyScore) return false;
+    if (machine.requireEmail && !lead.email) return false;
+    if (machine.requireWebsite && !lead.website) return false;
+    if (machine.requireWorkingWebsite && (!lead.website || lead.websiteReachable === false)) return false;
+    const variants = leadKeyVariants(lead);
+    if (variants.some((key) => seen.has(key))) return false;
+    variants.forEach((key) => seen.add(key));
+    if (machine.excludeSeen && variants.some((key) => machine.excludeLeadKeys.has(key))) return false;
+    return true;
+  });
+
+  const sorted = [...filtered].sort((a, b) => {
+    if (machine.sortMode === "score") return (b.score || 0) - (a.score || 0) || (b.moneyScore || 0) - (a.moneyScore || 0);
+    if (machine.sortMode === "deal") return (b.estimatedDealValue || 0) - (a.estimatedDealValue || 0) || (b.moneyScore || 0) - (a.moneyScore || 0);
+    if (machine.sortMode === "fresh") return seededLeadOrder(a, machine.rotationSeed) - seededLeadOrder(b, machine.rotationSeed);
+    return (b.moneyScore || 0) - (a.moneyScore || 0) || (b.estimatedDealValue || 0) - (a.estimatedDealValue || 0);
+  });
+
+  if (!machine.rotateResults || sorted.length <= 1 || machine.sortMode === "fresh") return sorted;
+  const hotBand = sorted.filter((lead) => (lead.moneyScore || 0) >= 70);
+  const rest = sorted.filter((lead) => (lead.moneyScore || 0) < 70);
+  return [...shuffleStableLeads(hotBand, machine.rotationSeed), ...shuffleStableLeads(rest, `${machine.rotationSeed}-rest`)];
+}
+
+function leadKeyVariants(leadInput = {}) {
+  const lead = leadInput || {};
+  const variants = [
+    lead.id,
+    lead.email,
+    lead.website,
+    lead.websiteFinalUrl,
+    lead.osmUrl,
+    [lead.name, lead.city, lead.country].filter(Boolean).join("|")
+  ]
+    .map((item) => normalizeLeadKey(item))
+    .filter(Boolean);
+  try {
+    const host = new URL(String(lead.website || lead.websiteFinalUrl || "")).hostname.replace(/^www\./, "");
+    if (host) variants.push(`host:${host}`);
+  } catch {
+    // Ignore non-url keys.
+  }
+  return [...new Set(variants)];
+}
+
+function normalizeLeadKey(value) {
+  const raw = String(value || "").trim().toLowerCase();
+  if (!raw) return "";
+  if (/^https?:\/\//i.test(raw) || raw.includes(".")) {
+    try {
+      const url = new URL(/^https?:\/\//i.test(raw) ? raw : `https://${raw}`);
+      url.hash = "";
+      url.search = "";
+      return `url:${url.hostname.replace(/^www\./, "")}${url.pathname.replace(/\/$/, "")}`;
+    } catch {
+      return raw.replace(/\s+/g, " ");
+    }
+  }
+  return raw.replace(/\s+/g, " ");
+}
+
+function seededLeadOrder(lead, seed) {
+  return stableServerHash(`${seed}|${lead.id}|${lead.website}|${lead.email}|${lead.name}`);
+}
+
+function shuffleStableLeads(leads, seed) {
+  return [...leads].sort((a, b) => seededLeadOrder(a, seed) - seededLeadOrder(b, seed));
+}
+
+function stableServerHash(value) {
+  let hash = 2166136261;
+  for (const char of String(value || "")) {
+    hash ^= char.charCodeAt(0);
+    hash = Math.imul(hash, 16777619);
+  }
+  return hash >>> 0;
 }
 
 function buildMoneyMachineLead(business, report, payload, machine, index) {

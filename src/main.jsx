@@ -161,7 +161,12 @@ function App() {
     maxLeads: 30,
     minMoneyScore: 45,
     monthlyRetainer: 180,
-    closeRate: 12
+    closeRate: 12,
+    requireEmail: false,
+    requireWorkingWebsite: true,
+    excludeSeen: true,
+    rotateResults: true,
+    sortMode: "money"
   });
   const [moneyMachine, setMoneyMachine] = useState(() => readInitialMoneyMachine());
   const [backgroundJob, setBackgroundJob] = useState(() => readInitialBackgroundJob());
@@ -337,6 +342,14 @@ function App() {
     [replyText, selectedMoneyLead]
   );
   const dailySendQueue = useMemo(() => buildDailySendQueue(moneyLeads, savedLeads), [moneyLeads, savedLeads]);
+  const moneyExcludeKeys = useMemo(
+    () => buildMoneyExcludeKeys({ moneyLeads, savedLeads, crm, emailOperatorLeads, emailOperatorStatuses }),
+    [moneyLeads, savedLeads, crm, emailOperatorLeads, emailOperatorStatuses]
+  );
+  const moneyFilterStats = useMemo(
+    () => buildMoneyFilterStats(moneySettings, moneyExcludeKeys, moneyMachine),
+    [moneySettings, moneyExcludeKeys, moneyMachine]
+  );
   const automationStats = useMemo(() => summarizeAutomationStats(dailySendQueue, moneyLeads), [dailySendQueue, moneyLeads]);
   const emailOperatorCampaign = useMemo(
     () =>
@@ -613,7 +626,7 @@ function App() {
         body: JSON.stringify({
           ...form,
           ...discoverySettings,
-          locations: discoveryLocations,
+          locations: parseLocationLines(discoveryLocations),
           auditFound: true
         })
       });
@@ -754,6 +767,13 @@ function App() {
     setCopied("");
 
     try {
+      const runId = `money-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+      const requestedLeads = Number(moneySettings.maxLeads || 30);
+      const replacementBuffer = moneySettings.excludeSeen ? Math.min(25, moneyExcludeKeys.length) : 0;
+      const candidateLimit = Math.min(
+        100,
+        Math.max(Number(discoverySettings.limit || 30), requestedLeads * 3 + replacementBuffer)
+      );
       const response = await fetch("/api/lead-machine/jobs", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -761,8 +781,13 @@ function App() {
           ...form,
           ...discoverySettings,
           ...moneySettings,
-          locations: discoveryLocations,
-          auditFound: true
+          limit: candidateLimit,
+          requireWebsite: Boolean(discoverySettings.requireWebsite || moneySettings.requireWorkingWebsite),
+          locations: parseLocationLines(discoveryLocations),
+          auditFound: true,
+          excludeLeadKeys: moneySettings.excludeSeen ? moneyExcludeKeys : [],
+          runId,
+          rotationSeed: runId
         })
       });
       const data = await response.json();
@@ -1810,6 +1835,45 @@ function App() {
                 />
               </label>
             </div>
+            <label>
+              Sort
+              <select value={moneySettings.sortMode} onChange={(event) => updateMoneySettings("sortMode", event.target.value)}>
+                <option value="money">Money first</option>
+                <option value="score">Score first</option>
+                <option value="deal">Deal size</option>
+                <option value="fresh">Fresh rotation</option>
+              </select>
+            </label>
+            <div className="toggle-grid compact money-filter-grid" aria-label="Фильтры Money Machine">
+              <Toggle
+                label="Только email"
+                checked={Boolean(moneySettings.requireEmail)}
+                onChange={(value) => updateMoneySettings("requireEmail", value)}
+              />
+              <Toggle
+                label="Рабочий сайт"
+                checked={Boolean(moneySettings.requireWorkingWebsite)}
+                onChange={(value) => updateMoneySettings("requireWorkingWebsite", value)}
+              />
+              <Toggle
+                label="Не повторять"
+                checked={Boolean(moneySettings.excludeSeen)}
+                onChange={(value) => updateMoneySettings("excludeSeen", value)}
+              />
+              <Toggle
+                label="Свежая ротация"
+                checked={Boolean(moneySettings.rotateResults)}
+                onChange={(value) => updateMoneySettings("rotateResults", value)}
+              />
+            </div>
+            <div className="money-filter-summary">
+              <strong>Фильтры Money Machine</strong>
+              <span>{moneyFilterStats.activeLabels.join(" · ")}</span>
+              <p>
+                Не повторять: сервер пропустит {moneyFilterStats.excludeCount} уже увиденных ключей и расширит поиск до{" "}
+                {Math.min(100, Math.max(Number(discoverySettings.limit || 30), Number(moneySettings.maxLeads || 30) * 3 + Math.min(25, moneyFilterStats.excludeCount)))} кандидатов.
+              </p>
+            </div>
             <button className="primary-button wide" onClick={runMoneyMachine} disabled={moneyMachineBusy}>
               {moneyMachineBusy ? <Loader2 className="spin" size={16} /> : <BadgeDollarSign size={16} />}
               Запустить money machine
@@ -2088,7 +2152,20 @@ function App() {
                 value={automationStats.sendReady}
                 note={`${automationStats.avgQuality || 0}/100 email QA`}
               />
+              <MetricBlock
+                icon={<ShieldCheck size={18} />}
+                label="Отфильтровано"
+                value={moneyMachine.totals?.filteredOut || 0}
+                note={`${moneyMachine.totals?.candidate || 0} кандидатов`}
+              />
             </div>
+            {moneyMachine.warnings?.length ? (
+              <div className="money-warning-strip" role="status">
+                {moneyMachine.warnings.slice(0, 3).map((warning) => (
+                  <span key={warning}>{warning}</span>
+                ))}
+              </div>
+            ) : null}
 
             <section className="automation-console" aria-label="Daily Send Queue">
               <div className="console-head">
@@ -2973,6 +3050,91 @@ function mergeCrm(incoming, current) {
 function mergeLeads(incoming, current) {
   const normalized = incoming.map(normalizeLead).filter((lead) => lead.id && lead.name);
   return [...normalized, ...current.filter((lead) => !normalized.some((next) => next.id === lead.id))].slice(0, 80);
+}
+
+function parseLocationLines(value) {
+  if (Array.isArray(value)) return value.map(String).map((item) => item.trim()).filter(Boolean);
+  return String(value || "")
+    .split(/\r?\n|;/)
+    .map((item) => item.trim())
+    .filter(Boolean);
+}
+
+function buildMoneyExcludeKeys({ moneyLeads, savedLeads, crm, emailOperatorLeads, emailOperatorStatuses }) {
+  const keys = new Set();
+  const currentMoneyLeads = Array.isArray(moneyLeads) ? moneyLeads : [];
+  const currentSavedLeads = Array.isArray(savedLeads) ? savedLeads : [];
+  const currentCrm = Array.isArray(crm) ? crm : [];
+  const currentOperatorLeads = Array.isArray(emailOperatorLeads) ? emailOperatorLeads : [];
+  [...currentMoneyLeads, ...currentSavedLeads.map(normalizeLead), ...currentOperatorLeads.map(normalizeLead)].forEach((lead) => {
+    clientLeadKeyVariants(lead).forEach((key) => keys.add(key));
+  });
+  currentCrm.forEach((item) => {
+    [item.id, item.host, item.email, item.website].filter(Boolean).forEach((value) => {
+      clientLeadKeyVariants({ id: value, name: value, website: value, email: value }).forEach((key) => keys.add(key));
+    });
+  });
+  Object.entries(emailOperatorStatuses || {}).forEach(([id, status]) => {
+    if (["sent", "opened", "replied", "skipped"].includes(String(status?.status || ""))) {
+      clientLeadKeyVariants({ id }).forEach((key) => keys.add(key));
+    }
+  });
+  return [...keys].slice(0, 500);
+}
+
+function buildMoneyFilterStats(settings, excludeKeys, machine) {
+  const activeLabels = [
+    `score ${Number(settings.minMoneyScore || 0)}+`,
+    settings.requireEmail ? "email only" : "",
+    settings.requireWorkingWebsite ? "working site" : "",
+    settings.excludeSeen ? "skip seen" : "",
+    settings.rotateResults ? "fresh rotation" : "",
+    settings.sortMode === "score" ? "sort: audit score" : "",
+    settings.sortMode === "deal" ? "sort: deal size" : "",
+    settings.sortMode === "fresh" ? "sort: fresh" : ""
+  ].filter(Boolean);
+  return {
+    activeLabels: activeLabels.length ? activeLabels : ["basic ranking"],
+    excludeCount: excludeKeys.length,
+    filteredOut: Number(machine?.totals?.filteredOut || 0)
+  };
+}
+
+function clientLeadKeyVariants(leadInput = {}) {
+  const lead = leadInput || {};
+  const variants = [
+    lead.id,
+    lead.email,
+    lead.website,
+    lead.websiteFinalUrl,
+    lead.osmUrl,
+    [lead.name, lead.city, lead.country].filter(Boolean).join("|")
+  ]
+    .map(clientNormalizeLeadKey)
+    .filter(Boolean);
+  try {
+    const host = new URL(safeExternalUrl(lead.website || lead.websiteFinalUrl) || String(lead.website || lead.websiteFinalUrl || "")).hostname.replace(/^www\./, "");
+    if (host) variants.push(`host:${host}`);
+  } catch {
+    // Non-url keys are still useful and are handled above.
+  }
+  return [...new Set(variants)];
+}
+
+function clientNormalizeLeadKey(value) {
+  const raw = String(value || "").trim().toLowerCase();
+  if (!raw) return "";
+  if (/^https?:\/\//i.test(raw) || raw.includes(".")) {
+    try {
+      const url = new URL(/^https?:\/\//i.test(raw) ? raw : `https://${raw}`);
+      url.hash = "";
+      url.search = "";
+      return `url:${url.hostname.replace(/^www\./, "")}${url.pathname.replace(/\/$/, "")}`;
+    } catch {
+      return raw.replace(/\s+/g, " ");
+    }
+  }
+  return raw.replace(/\s+/g, " ");
 }
 
 function normalizeLead(lead) {

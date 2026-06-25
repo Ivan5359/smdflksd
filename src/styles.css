@@ -1163,7 +1163,7 @@ select:focus {
 
 .money-summary-grid {
   display: grid;
-  grid-template-columns: repeat(5, minmax(0, 1fr));
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 8px;
   margin-bottom: 10px;
 }
@@ -1186,6 +1186,42 @@ select:focus {
   background:
     linear-gradient(135deg, rgba(47, 125, 255, 0.12), rgba(255, 255, 255, 0.025) 42%, transparent),
     rgba(3, 7, 14, 0.88);
+}
+
+.money-filter-grid {
+  margin-top: 9px;
+}
+
+.money-filter-summary,
+.money-warning-strip {
+  display: grid;
+  gap: 4px;
+  margin-top: 9px;
+  padding: 10px;
+  border: 1px solid rgba(56, 213, 255, 0.22);
+  border-radius: 8px;
+  background:
+    linear-gradient(135deg, rgba(47, 125, 255, 0.12), transparent),
+    rgba(1, 6, 12, 0.72);
+}
+
+.money-filter-summary strong,
+.money-warning-strip span {
+  color: var(--text);
+  font-size: 12px;
+}
+
+.money-filter-summary span,
+.money-filter-summary p,
+.money-warning-strip {
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.45;
+}
+
+.money-warning-strip {
+  margin: -1px 0 10px;
+  border-color: rgba(255, 203, 101, 0.28);
 }
 
 .background-job-card.compact {
