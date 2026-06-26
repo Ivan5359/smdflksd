@@ -139,6 +139,114 @@ const messageTabs = [
   { id: "telegram", label: "Telegram" }
 ];
 
+const stellarParticles = Array.from({ length: 84 }, (_, index) => ({
+  id: `star-${index}`,
+  x: `${(index * 37 + 11) % 100}%`,
+  y: `${(index * 61 + 7) % 100}%`,
+  size: `${1 + (index % 4) * 0.55}px`,
+  dx: `${((index % 9) - 4) * 12}px`,
+  dy: `${((index % 11) - 5) * 9}px`,
+  delay: `${-(index % 19) * 0.55}s`,
+  duration: `${13 + (index % 10) * 1.9}s`,
+  opacity: (0.14 + (index % 6) * 0.045).toFixed(2)
+}));
+
+const moneyAutomationPresets = [
+  {
+    id: "fresh-global",
+    label: "Fresh global",
+    detail: "Мир, новая ротация, без повторов",
+    moneySettings: {
+      maxLeads: 35,
+      minMoneyScore: 35,
+      requireEmail: false,
+      requireWorkingWebsite: true,
+      excludeSeen: true,
+      rotateResults: true,
+      sortMode: "fresh",
+      autoOperatorQueue: true
+    },
+    discoverySettings: {
+      worldwide: true,
+      limit: 90,
+      auditLimit: 8,
+      locationLimit: 10,
+      radiusKm: 16,
+      requireWebsite: false
+    }
+  },
+  {
+    id: "email-only",
+    label: "Email-only scan",
+    detail: "Сразу под Gmail очередь",
+    moneySettings: {
+      maxLeads: 25,
+      minMoneyScore: 0,
+      requireEmail: true,
+      requireWorkingWebsite: false,
+      excludeSeen: true,
+      rotateResults: true,
+      sortMode: "fresh",
+      autoOperatorQueue: true
+    },
+    discoverySettings: {
+      worldwide: true,
+      limit: 100,
+      auditLimit: 4,
+      locationLimit: 12,
+      radiusKm: 18,
+      requireWebsite: false
+    }
+  },
+  {
+    id: "high-ticket",
+    label: "High-ticket sweep",
+    detail: "Больше чек, меньше мусора",
+    moneySettings: {
+      maxLeads: 24,
+      minMoneyScore: 60,
+      monthlyRetainer: 320,
+      requireEmail: false,
+      requireWorkingWebsite: true,
+      excludeSeen: true,
+      rotateResults: true,
+      sortMode: "deal",
+      autoOperatorQueue: true
+    },
+    discoverySettings: {
+      worldwide: true,
+      limit: 80,
+      auditLimit: 10,
+      locationLimit: 8,
+      radiusKm: 14,
+      requireWebsite: true
+    }
+  },
+  {
+    id: "local-sprint",
+    label: "Local sprint",
+    detail: "Быстрый скан текущих городов",
+    moneySettings: {
+      maxLeads: 18,
+      minMoneyScore: 45,
+      requireEmail: false,
+      requireWorkingWebsite: true,
+      excludeSeen: true,
+      rotateResults: true,
+      sortMode: "money",
+      autoOperatorQueue: true
+    },
+    discoverySettings: {
+      worldwide: false,
+      limit: 60,
+      auditLimit: 6,
+      locationLimit: 5,
+      radiusKm: 18,
+      requireWebsite: false
+    }
+  }
+];
+
 function App() {
   const [form, setForm] = useState(defaultForm);
   const [queueText, setQueueText] = useState(defaultQueue);
@@ -166,10 +274,12 @@ function App() {
     requireWorkingWebsite: true,
     excludeSeen: true,
     rotateResults: true,
-    sortMode: "money"
+    sortMode: "money",
+    autoOperatorQueue: true
   });
   const [moneyMachine, setMoneyMachine] = useState(() => readInitialMoneyMachine());
   const [backgroundJob, setBackgroundJob] = useState(() => readInitialBackgroundJob());
+  const [seenMoneyKeys, setSeenMoneyKeys] = useState(() => readLocal("sitemoney.seenMoneyKeys", []));
   const [emailOperatorInput, setEmailOperatorInput] = useState(() => readLocal("sitemoney.emailOperatorInput", defaultEmailOperatorInput));
   const [emailOperatorLeads, setEmailOperatorLeads] = useState(() => readLocal("sitemoney.emailOperatorLeads", []));
   const [emailOperatorStatuses, setEmailOperatorStatuses] = useState(() => readLocal("sitemoney.emailOperatorStatuses", {}));
@@ -343,14 +453,18 @@ function App() {
   );
   const dailySendQueue = useMemo(() => buildDailySendQueue(moneyLeads, savedLeads), [moneyLeads, savedLeads]);
   const moneyExcludeKeys = useMemo(
-    () => buildMoneyExcludeKeys({ moneyLeads, savedLeads, crm, emailOperatorLeads, emailOperatorStatuses }),
-    [moneyLeads, savedLeads, crm, emailOperatorLeads, emailOperatorStatuses]
+    () => buildMoneyExcludeKeys({ moneyLeads, savedLeads, crm, emailOperatorLeads, emailOperatorStatuses, seenMoneyKeys }),
+    [moneyLeads, savedLeads, crm, emailOperatorLeads, emailOperatorStatuses, seenMoneyKeys]
   );
   const moneyFilterStats = useMemo(
     () => buildMoneyFilterStats(moneySettings, moneyExcludeKeys, moneyMachine),
     [moneySettings, moneyExcludeKeys, moneyMachine]
   );
   const automationStats = useMemo(() => summarizeAutomationStats(dailySendQueue, moneyLeads), [dailySendQueue, moneyLeads]);
+  const automationFlowStats = useMemo(
+    () => buildAutomationFlowStats({ moneyMachine, moneyLeads, dailySendQueue, emailOperatorCampaign: null, seenMoneyKeys }),
+    [moneyMachine, moneyLeads, dailySendQueue, seenMoneyKeys]
+  );
   const emailOperatorCampaign = useMemo(
     () =>
       buildEmailOperatorCampaign({
@@ -682,6 +796,34 @@ function App() {
     removeLocal("sitemoney.moneyMachine");
   }
 
+  function rememberSeenMoneyLeads(leads) {
+    const keys = new Set(seenMoneyKeys);
+    (leads || []).map(normalizeLead).forEach((lead) => {
+      clientLeadKeyVariants(lead).forEach((key) => keys.add(key));
+    });
+    const next = [...keys].slice(-900);
+    setSeenMoneyKeys(next);
+    writeLocal("sitemoney.seenMoneyKeys", next);
+    return next;
+  }
+
+  function clearSeenMoneyKeys() {
+    setSeenMoneyKeys([]);
+    removeLocal("sitemoney.seenMoneyKeys");
+    setCopied("seen-cleared");
+    window.setTimeout(() => setCopied(""), 1400);
+  }
+
+  function autoImportMoneyLeadsToOperator(leads) {
+    const imported = buildDailySendQueue((leads || []).map(normalizeLead), [])
+      .slice(0, Number(emailOperatorSettings.dailyLimit || 25))
+      .map((lead) => normalizeLead({ ...lead, source: "money-machine-auto-queue" }));
+    if (!imported.length) return 0;
+    setEmailOperatorLeads(imported);
+    setEmailOperatorSelectedId(imported[0]?.id || "");
+    return imported.length;
+  }
+
   function applyMoneyMachineData(data, sourceJob = null, notify = true) {
     if (!data) return;
     if (!isCurrentMoneyMachineData(data)) {
@@ -695,9 +837,11 @@ function App() {
     setMoneyMachine(nextMachine);
     writeLocal("sitemoney.moneyMachine", nextMachine);
     setDiscoveredBusinesses(data.leads || []);
+    rememberSeenMoneyLeads(data.leads || []);
 
     const normalizedLeads = (data.leads || []).map(normalizeLead);
     if (normalizedLeads.length) setSelectedLeadId(normalizedLeads[0].id);
+    const importedCount = moneySettings.autoOperatorQueue ? autoImportMoneyLeadsToOperator(normalizedLeads) : 0;
 
     const reportItems = (data.reports || []).map((item) => ({ ok: true, report: item }));
     setBulkResults(reportItems);
@@ -722,7 +866,7 @@ function App() {
     }
 
     if (notify) {
-      setCopied("money-machine");
+      setCopied(importedCount ? "money-machine-auto-queue" : "money-machine");
       window.setTimeout(() => setCopied(""), 1600);
     }
   }
@@ -761,33 +905,50 @@ function App() {
     }
   }
 
-  async function runMoneyMachine() {
+  async function runMoneyMachine(overrides = {}) {
+    if (overrides?.preventDefault) overrides = {};
+    const nextMoneySettings = { ...moneySettings, ...(overrides.moneySettings || {}) };
+    const nextDiscoverySettings = { ...discoverySettings, ...(overrides.discoverySettings || {}) };
+    const nextDiscoveryLocations = overrides.locations ? overrides.locations.join("\n") : discoveryLocations;
+    if (overrides.moneySettings) setMoneySettings(nextMoneySettings);
+    if (overrides.discoverySettings) setDiscoverySettings(nextDiscoverySettings);
+    if (overrides.locations) setDiscoveryLocations(nextDiscoveryLocations);
+
     setMoneyLoading(true);
     setError("");
     setCopied("");
 
     try {
       const runId = `money-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-      const requestedLeads = Number(moneySettings.maxLeads || 30);
-      const replacementBuffer = moneySettings.excludeSeen ? Math.min(25, moneyExcludeKeys.length) : 0;
+      const excludeKeys = buildMoneyExcludeKeys({
+        moneyLeads,
+        savedLeads,
+        crm,
+        emailOperatorLeads,
+        emailOperatorStatuses,
+        seenMoneyKeys
+      });
+      const requestedLeads = Number(nextMoneySettings.maxLeads || 30);
+      const replacementBuffer = nextMoneySettings.excludeSeen ? Math.min(55, excludeKeys.length) : 0;
       const candidateLimit = Math.min(
         100,
-        Math.max(Number(discoverySettings.limit || 30), requestedLeads * 3 + replacementBuffer)
+        Math.max(Number(nextDiscoverySettings.limit || 30), requestedLeads * 4 + replacementBuffer)
       );
       const response = await fetch("/api/lead-machine/jobs", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           ...form,
-          ...discoverySettings,
-          ...moneySettings,
+          ...nextDiscoverySettings,
+          ...nextMoneySettings,
           limit: candidateLimit,
-          requireWebsite: Boolean(discoverySettings.requireWebsite || moneySettings.requireWorkingWebsite),
-          locations: parseLocationLines(discoveryLocations),
+          requireWebsite: Boolean(nextDiscoverySettings.requireWebsite || nextMoneySettings.requireWorkingWebsite),
+          locations: parseLocationLines(nextDiscoveryLocations),
           auditFound: true,
-          excludeLeadKeys: moneySettings.excludeSeen ? moneyExcludeKeys : [],
+          excludeLeadKeys: nextMoneySettings.excludeSeen ? excludeKeys : [],
           runId,
-          rotationSeed: runId
+          rotationSeed: `${runId}-${excludeKeys.length}`,
+          sourceOffset: excludeKeys.length + Math.floor(Math.random() * 997)
         })
       });
       const data = await response.json();
@@ -800,6 +961,15 @@ function App() {
       setMoneyLoading(false);
       setError(machineError.message || "Не удалось запустить money machine.");
     }
+  }
+
+  async function runMoneyPreset(preset) {
+    if (!preset) return;
+    await runMoneyMachine({
+      moneySettings: preset.moneySettings,
+      discoverySettings: preset.discoverySettings,
+      locations: preset.locations
+    });
   }
 
   function acceptReport(nextReport, persist) {
@@ -990,6 +1160,31 @@ function App() {
 
   async function copyTodayPlan() {
     await copyText("profit-cockpit-plan", buildTodayPlanText(profitCockpit, workdayActions, dailySendQueue));
+  }
+
+  async function copyAutomationLaunchPack() {
+    const body = [
+      "SiteMoney Autopilot Launch Pack",
+      `Version: ${APP_VERSION}`,
+      `Run: ${moneyMachine.jobId || backgroundJob?.id || "manual"}`,
+      `Filters: ${moneyFilterStats.activeLabels.join(", ")}`,
+      `Seen memory: ${seenMoneyKeys.length} keys`,
+      `Fresh leads: ${moneyLeads.length}`,
+      `Gmail queue: ${dailySendQueue.length}`,
+      `Expected 7-day value: ${moneyText(profitCockpit.expected7DayValue)}`,
+      "",
+      buildTodayPlanText(profitCockpit, workdayActions, dailySendQueue),
+      "",
+      "Email Operator Pack",
+      buildEmailOperatorPack(emailOperatorQueue, emailOperatorSettings),
+      "",
+      "Top Money Leads",
+      ...moneyLeads.slice(0, 10).map((lead, index) => {
+        const links = getLeadLinks(lead);
+        return `${index + 1}. ${lead.name} | ${lead.email || "manual email"} | ${links.website || links.search || "no website"} | ${lead.serviceOffer?.name || "Conversion Sprint"} | ${money(lead.estimatedDealValue || 0)}`;
+      })
+    ].join("\n");
+    await copyText("automation-launch-pack", body);
   }
 
   function downloadProfitSprintPlan() {
@@ -1257,6 +1452,8 @@ function App() {
       : 0;
 
     return (
+      <>
+      <StellarField />
       <div className="email-cockpit-shell">
         <aside className="email-cockpit-sidebar" aria-label="Email Operator navigation">
           <div className="email-cockpit-logo">
@@ -1554,10 +1751,13 @@ function App() {
           </section>
         </main>
       </div>
+      </>
     );
   }
 
   return (
+    <>
+    <StellarField />
     <div className="app-shell command-center">
       <header className="topbar">
         <div className="brand">
@@ -1865,14 +2065,33 @@ function App() {
                 checked={Boolean(moneySettings.rotateResults)}
                 onChange={(value) => updateMoneySettings("rotateResults", value)}
               />
+              <Toggle
+                label="Auto queue"
+                checked={Boolean(moneySettings.autoOperatorQueue)}
+                onChange={(value) => updateMoneySettings("autoOperatorQueue", value)}
+              />
             </div>
             <div className="money-filter-summary">
               <strong>Фильтры Money Machine</strong>
               <span>{moneyFilterStats.activeLabels.join(" · ")}</span>
               <p>
                 Не повторять: сервер пропустит {moneyFilterStats.excludeCount} уже увиденных ключей и расширит поиск до{" "}
-                {Math.min(100, Math.max(Number(discoverySettings.limit || 30), Number(moneySettings.maxLeads || 30) * 3 + Math.min(25, moneyFilterStats.excludeCount)))} кандидатов.
+                {Math.min(100, Math.max(Number(discoverySettings.limit || 30), Number(moneySettings.maxLeads || 30) * 4 + Math.min(55, moneyFilterStats.excludeCount)))} кандидатов.
               </p>
+            </div>
+            <div className="automation-preset-bank" aria-label="Automation presets">
+              {moneyAutomationPresets.map((preset) => (
+                <button type="button" key={preset.id} onClick={() => runMoneyPreset(preset)} disabled={moneyMachineBusy}>
+                  <strong>{preset.label}</strong>
+                  <span>{preset.detail}</span>
+                </button>
+              ))}
+            </div>
+            <div className="seen-memory-row">
+              <span>Память анти-повтора: {seenMoneyKeys.length}</span>
+              <button type="button" onClick={clearSeenMoneyKeys}>
+                Reset seen
+              </button>
             </div>
             <button className="primary-button wide" onClick={runMoneyMachine} disabled={moneyMachineBusy}>
               {moneyMachineBusy ? <Loader2 className="spin" size={16} /> : <BadgeDollarSign size={16} />}
@@ -2015,6 +2234,37 @@ function App() {
                 </button>
               </div>
             </div>
+
+            <section className="stellar-autopilot" aria-label="Stellar autopilot">
+              <div className="stellar-autopilot-head">
+                <div>
+                  <span>Stellar Autopilot</span>
+                  <strong>Automation presets</strong>
+                  <p>One click starts a fresh scan, skips seen businesses, rebuilds the Gmail queue, and keeps the server job running in the background.</p>
+                </div>
+                <button type="button" className="primary-button" onClick={copyAutomationLaunchPack} disabled={!moneyLeads.length && !emailOperatorQueue.length}>
+                  <Copy size={15} />
+                  Launch pack
+                </button>
+              </div>
+              <div className="stellar-preset-grid">
+                {moneyAutomationPresets.map((preset) => (
+                  <button type="button" key={`panel-${preset.id}`} onClick={() => runMoneyPreset(preset)} disabled={moneyMachineBusy}>
+                    <b>{preset.label}</b>
+                    <span>{preset.detail}</span>
+                  </button>
+                ))}
+              </div>
+              <div className="automation-flow-grid">
+                {automationFlowStats.map((item) => (
+                  <article key={item.label}>
+                    <span>{item.label}</span>
+                    <strong>{item.value}</strong>
+                    <p>{item.note}</p>
+                  </article>
+                ))}
+              </div>
+            </section>
 
             <section className="profit-cockpit" aria-label="Profit Cockpit">
               <div className="cockpit-hero">
@@ -2922,6 +3172,30 @@ function App() {
         </aside>
       </main>
     </div>
+    </>
+  );
+}
+
+function StellarField() {
+  return (
+    <div className="stellar-field" aria-hidden="true">
+      {stellarParticles.map((particle) => (
+        <i
+          key={particle.id}
+          className="stellar-particle"
+          style={{
+            "--x": particle.x,
+            "--y": particle.y,
+            "--size": particle.size,
+            "--dx": particle.dx,
+            "--dy": particle.dy,
+            "--delay": particle.delay,
+            "--duration": particle.duration,
+            "--opacity": particle.opacity
+          }}
+        />
+      ))}
+    </div>
   );
 }
 
@@ -3060,12 +3334,15 @@ function parseLocationLines(value) {
     .filter(Boolean);
 }
 
-function buildMoneyExcludeKeys({ moneyLeads, savedLeads, crm, emailOperatorLeads, emailOperatorStatuses }) {
+function buildMoneyExcludeKeys({ moneyLeads, savedLeads, crm, emailOperatorLeads, emailOperatorStatuses, seenMoneyKeys = [] }) {
   const keys = new Set();
   const currentMoneyLeads = Array.isArray(moneyLeads) ? moneyLeads : [];
   const currentSavedLeads = Array.isArray(savedLeads) ? savedLeads : [];
   const currentCrm = Array.isArray(crm) ? crm : [];
   const currentOperatorLeads = Array.isArray(emailOperatorLeads) ? emailOperatorLeads : [];
+  (Array.isArray(seenMoneyKeys) ? seenMoneyKeys : []).forEach((key) => {
+    if (key) keys.add(String(key));
+  });
   [...currentMoneyLeads, ...currentSavedLeads.map(normalizeLead), ...currentOperatorLeads.map(normalizeLead)].forEach((lead) => {
     clientLeadKeyVariants(lead).forEach((key) => keys.add(key));
   });
@@ -3557,6 +3834,17 @@ function summarizeAutomationStats(queue, moneyLeads) {
   return { sendReady, withEmail, withGmail, avgQuality };
 }
 
+function buildAutomationFlowStats({ moneyMachine, moneyLeads, dailySendQueue, seenMoneyKeys }) {
+  const totals = moneyMachine?.totals || {};
+  return [
+    { label: "Found", value: Number(totals.found || moneyLeads.length || 0), note: "raw scan" },
+    { label: "Filtered", value: Number(totals.filteredOut || 0), note: "skipped" },
+    { label: "Ranked", value: moneyLeads.length, note: "money list" },
+    { label: "Gmail", value: dailySendQueue.length, note: "send-ready" },
+    { label: "Seen", value: (seenMoneyKeys || []).length, note: "anti-repeat" }
+  ];
+}
+
 function parseDailyPlanLeads(textInput, defaults = {}) {
   const text = String(textInput || "");
   const meta = extractDailyPlanMeta(text, defaults);
@@ -3952,6 +4240,9 @@ function buildTodayPlanText(profitCockpit, actions, dailySendQueue) {
 function copyStatusLabel(value) {
   const key = String(value || "");
   if (key === "profit-cockpit-plan") return "Today operator plan copied";
+  if (key === "automation-launch-pack") return "Autopilot launch pack copied";
+  if (key === "money-machine-auto-queue") return "Money Machine ready, Email Operator queue rebuilt";
+  if (key === "seen-cleared") return "Seen lead memory cleared";
   if (key === "profit-sprint") return "Profit sprint file prepared";
   if (key === "daily-plan") return "Daily send plan prepared";
   if (key === "outreach-pack") return "Outreach pack prepared";

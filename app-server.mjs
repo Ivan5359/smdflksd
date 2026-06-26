@@ -497,14 +497,23 @@ async function auditSingle(input) {
 
 async function executeLeadMachine(input = {}, onProgress = null) {
   const machine = normalizeLeadMachinePayload(input || {});
-  const expandedLimit = Math.min(100, Math.max(45, machine.maxLeads * 3 + machine.excludeLeadKeys.size));
+  const expandedLimit = Math.min(100, Math.max(55, machine.maxLeads * 4 + Math.min(55, machine.excludeLeadKeys.size)));
+  const sourceOffset = clampNumber(
+    input?.sourceOffset,
+    0,
+    5000,
+    stableServerHash(`${machine.rotationSeed}|${machine.excludeLeadKeys.size}`) % 997
+  );
   const payload = normalizeDiscoveryPayload({
     ...input,
     auditFound: input?.auditFound !== false,
     limit: input?.limit || expandedLimit,
     auditLimit: input?.auditLimit || 10,
     locationLimit: input?.locationLimit || 8,
-    requireWebsite: Boolean(input.requireWebsite || machine.requireWebsite || machine.requireWorkingWebsite)
+    requireWebsite: Boolean(input.requireWebsite || machine.requireWebsite || machine.requireWorkingWebsite),
+    rotationSeed: machine.rotationSeed,
+    sourceOffset,
+    excludeLeadKeys: input.excludeLeadKeys || []
   });
   await reportProgress(onProgress, {
     phase: "prepare",
@@ -767,6 +776,15 @@ async function inspectFrontendBuild() {
     moneyWorkingSite: "Рабочий сайт",
     moneyNoRepeat: "Не повторять",
     moneyFreshRotation: "Свежая ротация",
+    moneyAutoQueue: "Auto queue",
+    automationPresets: "Automation presets",
+    freshGlobal: "Fresh global",
+    emailOnlyScan: "Email-only scan",
+    highTicketSweep: "High-ticket sweep",
+    localSprint: "Local sprint",
+    stellarAutopilot: "Stellar Autopilot",
+    launchPack: "Launch pack",
+    seenMemory: "Память анти-повтора",
     moneyFilteredOut: "Отфильтровано",
     hotLeads: "Горячие лиды",
     leadWorkbench: "Lead Workbench",
@@ -936,12 +954,12 @@ function normalizeQueue(value) {
 }
 
 async function runBusinessDiscovery(payload, input = {}, onProgress = null) {
-  const locations = payload.worldwide
-    ? WORLD_LOCATIONS.slice(0, payload.locationLimit)
-    : await resolveLocations(payload);
+  const baseLocations = payload.worldwide ? WORLD_LOCATIONS : await resolveLocations(payload);
+  const locations = rotateLocations(baseLocations, payload.rotationSeed, payload.sourceOffset).slice(0, payload.locationLimit);
   const rawBusinesses = [];
   const seen = new Set();
   const warnings = [];
+  const excludeLeadKeys = payload.excludeLeadKeys instanceof Set ? payload.excludeLeadKeys : new Set();
 
   await reportProgress(onProgress, {
     phase: "search",
@@ -972,6 +990,7 @@ async function runBusinessDiscovery(payload, input = {}, onProgress = null) {
     for (const business of businesses) {
       const key = String(business.website || `${business.name}-${business.lat}-${business.lon}`).toLowerCase();
       if (seen.has(key)) continue;
+      if (leadKeyVariants(business).some((variant) => excludeLeadKeys.has(variant))) continue;
       seen.add(key);
       rawBusinesses.push(business);
       if (rawBusinesses.length >= payload.limit) break;
@@ -1156,7 +1175,10 @@ function normalizeDiscoveryPayload(input) {
     validateWebsites: input.validateWebsites !== false,
     websiteCheckLimit: clampNumber(input.websiteCheckLimit, 0, 100, Math.min(limit, 45)),
     averageSale: Number(input.averageSale || 300),
-    monthlyVisitors: Number(input.monthlyVisitors || 600)
+    monthlyVisitors: Number(input.monthlyVisitors || 600),
+    rotationSeed: String(input.rotationSeed || input.runId || Date.now()),
+    sourceOffset: clampNumber(input.sourceOffset, 0, 5000, 0),
+    excludeLeadKeys: normalizeExcludeLeadKeys(input.excludeLeadKeys || input.excludeKeys || input.seenLeadKeys || [])
   };
 }
 
@@ -1253,12 +1275,11 @@ async function searchBusinesses(location, payload) {
         continue;
       }
       const data = await readJsonWithTimeout(response, 15000);
-      return (data.elements || [])
+      const candidates = (data.elements || [])
         .map((element) => normalizeOsmBusiness(element, location, payload))
         .filter((business) => isRelevantBusinessForNiche(business, payload.niche))
-        .filter((business) => business.name && (!payload.requireWebsite || business.website))
-        .sort(sortBusinessesByContactQuality)
-        .slice(0, payload.limit);
+        .filter((business) => business.name && (!payload.requireWebsite || business.website));
+      return rotateBusinessCandidates(candidates, payload, location.label).slice(0, payload.limit);
     } catch (error) {
       lastError = `${new URL(endpoint).hostname} ${error.message || "request failed"}`;
     }
@@ -1301,12 +1322,11 @@ async function searchBusinessesWithNominatim(location, payload) {
   }, 15000);
   if (!response.ok) return [];
   const data = await readJsonWithTimeout(response, 10000);
-  return (data || [])
+  const candidates = (data || [])
     .map((item) => normalizeNominatimBusiness(item, location, payload))
     .filter((business) => isRelevantBusinessForNiche(business, payload.niche))
-    .filter((business) => business.name && (!payload.requireWebsite || business.website))
-    .sort(sortBusinessesByContactQuality)
-    .slice(0, payload.limit);
+    .filter((business) => business.name && (!payload.requireWebsite || business.website));
+  return rotateBusinessCandidates(candidates, payload, `${location.label}-fallback`).slice(0, payload.limit);
 }
 
 function normalizeNominatimBusiness(item, location, payload) {
@@ -1415,6 +1435,36 @@ function businessContactQuality(business) {
     (business.email ? 28 : 0) +
     (business.mapUrl || business.osmUrl ? 12 : 0) +
     Number(business.automationScore || 0)
+  );
+}
+
+function rotateLocations(locations, seed, sourceOffset = 0) {
+  const sorted = [...locations].sort(
+    (a, b) =>
+      stableServerHash(`${seed}|location|${a.label || a.city}`) -
+      stableServerHash(`${seed}|location|${b.label || b.city}`)
+  );
+  if (!sorted.length) return sorted;
+  const offset = Math.abs(Number(sourceOffset || 0)) % sorted.length;
+  return [...sorted.slice(offset), ...sorted.slice(0, offset)];
+}
+
+function rotateBusinessCandidates(candidates, payload, salt = "") {
+  const seed = `${payload.rotationSeed}|${payload.sourceOffset}|${salt}`;
+  const sorted = [...candidates].sort((a, b) => {
+    const bandA = Math.floor(businessContactQuality(a) / 35);
+    const bandB = Math.floor(businessContactQuality(b) / 35);
+    if (bandA !== bandB) return bandB - bandA;
+    return seededBusinessOrder(a, seed) - seededBusinessOrder(b, seed);
+  });
+  if (!sorted.length) return sorted;
+  const offset = Math.abs(Number(payload.sourceOffset || 0)) % sorted.length;
+  return [...sorted.slice(offset), ...sorted.slice(0, offset)];
+}
+
+function seededBusinessOrder(business, seed) {
+  return stableServerHash(
+    `${seed}|${business.id || ""}|${business.website || ""}|${business.email || ""}|${business.name || ""}|${business.lat || ""}|${business.lon || ""}`
   );
 }
 

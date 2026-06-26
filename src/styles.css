@@ -1,18 +1,18 @@
 :root {
   color-scheme: dark;
-  --bg: #020409;
-  --bg-2: #05080f;
-  --panel: #060b13;
-  --panel-2: #09111c;
-  --panel-3: #0d1727;
-  --line: #183050;
-  --line-soft: rgba(162, 205, 255, 0.16);
+  --bg: #010204;
+  --bg-2: #040507;
+  --panel: #07080b;
+  --panel-2: #0c0e12;
+  --panel-3: #12161c;
+  --line: #2a3038;
+  --line-soft: rgba(255, 255, 255, 0.13);
   --text: #f9fbff;
-  --muted: #91a5c4;
-  --soft: #d5e2f7;
-  --blue: #216dff;
-  --cyan: #5fdcff;
-  --white-glow: rgba(255, 255, 255, 0.08);
+  --muted: #9aa1aa;
+  --soft: #d9dee7;
+  --blue: #4f8dff;
+  --cyan: #93e8ff;
+  --white-glow: rgba(255, 255, 255, 0.11);
   --danger: #ff6575;
   --warning: #ffcb65;
   --good: #73e6ff;
@@ -37,10 +37,87 @@ body {
   min-height: 100vh;
   color: var(--text);
   background:
-    linear-gradient(rgba(95, 220, 255, 0.045) 1px, transparent 1px),
-    linear-gradient(90deg, rgba(95, 220, 255, 0.035) 1px, transparent 1px),
-    linear-gradient(180deg, #07101d 0, #020409 360px, #000 100%);
-  background-size: 34px 34px, 34px 34px, auto;
+    linear-gradient(rgba(255, 255, 255, 0.035) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(255, 255, 255, 0.024) 1px, transparent 1px),
+    linear-gradient(180deg, #07090d 0, #020305 380px, #000 100%);
+  background-size: 38px 38px, 38px 38px, auto;
+}
+
+#root {
+  position: relative;
+  isolation: isolate;
+  min-height: 100vh;
+}
+
+.stellar-field {
+  position: fixed;
+  inset: 0;
+  z-index: 0;
+  pointer-events: none;
+  overflow: hidden;
+  background:
+    radial-gradient(circle at 18% 12%, rgba(255, 255, 255, 0.08) 0 1px, transparent 1.6px),
+    radial-gradient(circle at 78% 24%, rgba(147, 232, 255, 0.09) 0 1px, transparent 1.7px),
+    radial-gradient(circle at 58% 82%, rgba(255, 255, 255, 0.07) 0 1px, transparent 1.6px);
+  background-size: 180px 180px, 230px 230px, 260px 260px;
+  opacity: 0.9;
+}
+
+.stellar-field::before,
+.stellar-field::after {
+  content: "";
+  position: absolute;
+  inset: -12%;
+  background-image:
+    linear-gradient(rgba(255, 255, 255, 0.028) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(255, 255, 255, 0.02) 1px, transparent 1px);
+  background-size: 74px 74px;
+  animation: starfieldShift 42s linear infinite;
+}
+
+.stellar-field::after {
+  opacity: 0.38;
+  background-size: 118px 118px;
+  animation-duration: 67s;
+  animation-direction: reverse;
+}
+
+.stellar-particle {
+  position: absolute;
+  left: var(--x);
+  top: var(--y);
+  width: var(--size);
+  height: var(--size);
+  border-radius: 999px;
+  background: #f8fbff;
+  opacity: var(--opacity);
+  box-shadow: 0 0 10px rgba(147, 232, 255, 0.45);
+  animation: particleDrift var(--duration) ease-in-out infinite alternate;
+  animation-delay: var(--delay);
+}
+
+@keyframes particleDrift {
+  0% {
+    transform: translate3d(0, 0, 0) scale(0.72);
+  }
+
+  47% {
+    transform: translate3d(calc(var(--dx) * -0.35), calc(var(--dy) * 0.42), 0) scale(1.12);
+  }
+
+  100% {
+    transform: translate3d(var(--dx), var(--dy), 0) scale(0.84);
+  }
+}
+
+@keyframes starfieldShift {
+  from {
+    transform: translate3d(0, 0, 0);
+  }
+
+  to {
+    transform: translate3d(74px, 118px, 0);
+  }
 }
 
 button,
@@ -66,8 +143,15 @@ a {
 }
 
 .app-shell {
+  position: relative;
+  z-index: 1;
   min-height: 100vh;
   padding: 12px;
+}
+
+.email-cockpit-shell {
+  position: relative;
+  z-index: 1;
 }
 
 #automation,
@@ -3073,9 +3157,258 @@ select:focus {
   }
 }
 
+.topbar,
+.control-slab,
+.drawer-section,
+.radar-hub,
+.radar-card,
+.target-stream,
+.intel-deck,
+.history-panel,
+.money-machine-panel,
+.profit-cockpit,
+.email-operator-panel,
+.lead-workbench,
+.automation-console,
+.background-job-card,
+.cockpit-panel {
+  backdrop-filter: blur(18px);
+}
+
+.topbar,
+.control-slab,
+.drawer-section,
+.radar-hub,
+.target-stream,
+.intel-deck,
+.history-panel {
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.062), rgba(255, 255, 255, 0.018)),
+    rgba(0, 0, 0, 0.76);
+}
+
+.brand-mark,
+.metric-icon,
+.stream-score,
+.operator-action-grid i {
+  color: #f8fbff;
+  border-color: rgba(255, 255, 255, 0.24);
+  background: rgba(255, 255, 255, 0.055);
+  box-shadow: inset 0 0 0 1px rgba(147, 232, 255, 0.08);
+}
+
+.primary-button {
+  color: #020306;
+  background: linear-gradient(135deg, #ffffff, #aeb8c5 72%, #86dbff);
+  box-shadow: 0 16px 38px rgba(255, 255, 255, 0.11), 0 0 30px rgba(147, 232, 255, 0.13);
+}
+
+.secondary-button,
+.ghost-button,
+.input-with-action button,
+.icon-button,
+.preset-bank button,
+.toggle,
+.history-list button,
+.saved-list button {
+  background: rgba(255, 255, 255, 0.045);
+  border-color: rgba(255, 255, 255, 0.13);
+}
+
+.secondary-button:hover:not(:disabled),
+.ghost-button:hover:not(:disabled),
+.preset-bank button:hover:not(:disabled),
+.toggle:hover {
+  border-color: rgba(147, 232, 255, 0.45);
+  background: rgba(147, 232, 255, 0.08);
+}
+
+.money-machine-panel {
+  position: relative;
+  overflow: hidden;
+  border-color: rgba(255, 255, 255, 0.14);
+  background:
+    linear-gradient(rgba(255, 255, 255, 0.032) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(255, 255, 255, 0.022) 1px, transparent 1px),
+    linear-gradient(180deg, rgba(12, 14, 18, 0.94), rgba(0, 0, 0, 0.92)),
+    #020305;
+}
+
+.profit-cockpit {
+  border-color: rgba(255, 255, 255, 0.14);
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.055), rgba(255, 255, 255, 0.018)),
+    rgba(0, 0, 0, 0.58);
+}
+
+.cockpit-kpis div,
+.operator-action-grid article,
+.deal-ladder article {
+  border-color: rgba(255, 255, 255, 0.12);
+  background: rgba(255, 255, 255, 0.028);
+}
+
+.operator-action-grid article.active,
+.deal-ladder article.done {
+  border-color: rgba(147, 232, 255, 0.32);
+  background: rgba(255, 255, 255, 0.052);
+}
+
+.stellar-autopilot,
+.automation-preset-bank,
+.seen-memory-row {
+  border: 1px solid rgba(255, 255, 255, 0.13);
+  border-radius: 6px;
+}
+
+.stellar-autopilot {
+  display: grid;
+  gap: 10px;
+  margin: 10px 0 12px;
+  padding: 11px;
+  background:
+    linear-gradient(135deg, rgba(147, 232, 255, 0.11), transparent 30%),
+    rgba(255, 255, 255, 0.032);
+}
+
+.stellar-autopilot-head {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 12px;
+  align-items: center;
+}
+
+.stellar-autopilot-head span,
+.automation-flow-grid span,
+.stellar-preset-grid span,
+.automation-preset-bank span,
+.seen-memory-row span {
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.25;
+}
+
+.stellar-autopilot-head strong {
+  display: block;
+  margin-top: 3px;
+  color: var(--text);
+  font-size: 18px;
+  line-height: 1.1;
+}
+
+.stellar-autopilot-head p {
+  max-width: 780px;
+  margin: 5px 0 0;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.stellar-preset-grid,
+.automation-flow-grid,
+.automation-preset-bank {
+  display: grid;
+  gap: 8px;
+}
+
+.stellar-preset-grid {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+.stellar-preset-grid button,
+.automation-preset-bank button {
+  display: grid;
+  gap: 4px;
+  min-height: 66px;
+  padding: 10px;
+  color: var(--soft);
+  text-align: left;
+  border: 1px solid rgba(255, 255, 255, 0.13);
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.stellar-preset-grid button:hover:not(:disabled),
+.automation-preset-bank button:hover:not(:disabled) {
+  color: #fff;
+  border-color: rgba(147, 232, 255, 0.48);
+  background: rgba(147, 232, 255, 0.08);
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.04);
+}
+
+.stellar-preset-grid b,
+.automation-preset-bank strong {
+  font-size: 12px;
+  line-height: 1.1;
+}
+
+.automation-flow-grid {
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+}
+
+.automation-flow-grid article {
+  min-width: 0;
+  min-height: 72px;
+  padding: 10px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 6px;
+  background: rgba(0, 0, 0, 0.22);
+}
+
+.automation-flow-grid strong {
+  display: block;
+  margin-top: 4px;
+  color: var(--text);
+  font-size: 24px;
+  line-height: 1;
+}
+
+.automation-flow-grid p {
+  margin: 4px 0 0;
+  color: var(--muted);
+  font-size: 10px;
+  text-transform: uppercase;
+}
+
+.automation-preset-bank {
+  margin: 9px 0;
+  padding: 7px;
+  background: rgba(255, 255, 255, 0.025);
+}
+
+.automation-preset-bank button {
+  min-height: 58px;
+}
+
+.seen-memory-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  align-items: center;
+  min-height: 34px;
+  margin-bottom: 9px;
+  padding: 6px 8px;
+  background: rgba(255, 255, 255, 0.026);
+}
+
+.seen-memory-row button {
+  min-height: 24px;
+  padding: 0 8px;
+  color: var(--soft);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 5px;
+  background: rgba(255, 255, 255, 0.04);
+  font-size: 10px;
+  font-weight: 850;
+  text-transform: uppercase;
+}
+
 @media (prefers-reduced-motion: reduce) {
   .radar-sweep,
-  .spin {
+  .spin,
+  .stellar-particle,
+  .stellar-field::before,
+  .stellar-field::after {
     animation: none;
   }
 
@@ -3167,6 +3500,9 @@ select:focus {
   .email-operator-head,
   .email-operator-grid,
   .operator-automation-strip,
+  .stellar-autopilot-head,
+  .stellar-preset-grid,
+  .automation-flow-grid,
   .deal-ladder,
   .money-summary-grid,
   .money-lead-grid,
@@ -3314,6 +3650,8 @@ select:focus {
   .geo-bank,
   .contact-matrix,
   .operator-checklist,
+  .automation-flow-grid,
+  .stellar-preset-grid,
   .cockpit-kpis,
   .deal-ladder {
     grid-template-columns: 1fr;

@@ -1,4 +1,2 @@
-GITHUB_ROOT_UPLOAD_SITEMONEY_AUDIT_20260625_MONEY_FILTERS
-
-If Railway shows another version at /__version, it is not running this upload root.
-GitHub root must contain package.json, app-server.mjs, dist, src, scripts, and this marker file.
+GITHUB_ROOT_UPLOAD_SITEMONEY_AUDIT_20260626_STELLAR_AUTOMATION
+Railway upload root must contain package.json, pnpm-lock.yaml, app-server.mjs, src, dist, public, scripts. Upload the CONTENTS of this folder to GitHub, not the parent wrapper folder.
